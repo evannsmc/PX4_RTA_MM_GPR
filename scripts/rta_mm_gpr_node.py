@@ -13,8 +13,7 @@ from px4_msgs.msg import(
 
 import time
 import control
-import math as m
-import numpy as np  
+import numpy as np
 from typing import Optional
 from scipy.spatial.transform import Rotation as R
 
@@ -24,10 +23,8 @@ from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
 from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
 
-
-import jax
-import jax.numpy as jnp
 import immrax as irx
+import jax.numpy as jnp
 from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
 
@@ -51,7 +48,6 @@ actual_disturbance_GP = TVGPR(jnp.hstack((jnp.zeros((GP_instantiation_values.sha
 class OffboardControl(Node):
     def __init__(self, sim: bool) -> None:
         super().__init__('px4_rta_mm_gpr_node')
-        test_function()
         # Initialize essential variables
         self.sim: bool = sim
         self.GRAVITY: float = 9.806 # m/s^2, gravitational acceleration
@@ -158,8 +154,10 @@ class OffboardControl(Node):
         self.land_time = self.begin_actuator_control + 20 # (s) time after which we start sending landing commands
         if self.sim:
             self.max_height = -12.5
+            self.max_y = 4.0
         else:
             self.max_height = -2.5
+            self.max_y = 0.75
             # raise NotImplementedError("Hardware not implemented yet.")
 
     def init_jit_compile_nr_rta(self):
@@ -201,13 +199,13 @@ class OffboardControl(Node):
 
         @time_fns
         def jit_compile_lqr():
-            K_reference, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)
-            K_feedback, P, _ = control.lqr(A, B, Q_planar, R_planar)
+            K_reference, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)
+            K_feedback, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             return K_feedback, K_reference
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -377,7 +375,7 @@ class OffboardControl(Node):
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
                     # t0 = time.time()  # Reset time for rollout computation
                     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar
+                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar
                     )
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
@@ -450,7 +448,7 @@ class OffboardControl(Node):
             return  # skip the rest of this function if not in offboard mode
 
         if t < self.begin_actuator_control:
-            publish_position_setpoint(self, 0., 4.0, self.max_height, 0.0)
+            publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
         elif t < self.land_time:
             self.control_administrator()
         elif t > self.land_time or (abs(self.z) <= 1.5 and t > 20):
@@ -464,7 +462,7 @@ class OffboardControl(Node):
         else:
             raise ValueError("Unexpected time_from_start value or unexpected termination conditions")
 
-    def get_ref(self, time_from_start: float) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def get_ref(self, time_from_start: float) -> jnp.ndarray:
         """Get the reference trajectory for the LQR and NR tracker.
 
         Args:
@@ -486,23 +484,23 @@ class OffboardControl(Node):
         pitch_des = 0.0
         yaw_des = 0.0
 
-        ref_lqr_planar = jnp.array([y_des, z_des, vy_des, vz_des, roll_des])  # Reference position setpoint for planar LQR tracker (y, z, vy, vz, roll)
-        ref_lqr_3D = jnp.array([x_des, y_des, z_des, vx_des, vy_des, vz_des, roll_des, pitch_des, yaw_des])
+        # ref_lqr_planar = jnp.array([y_des, z_des, vy_des, vz_des, roll_des])  # Reference position setpoint for planar LQR tracker (y, z, vy, vz, roll)
+        # ref_lqr_3D = jnp.array([x_des, y_des, z_des, vx_des, vy_des, vz_des, roll_des, pitch_des, yaw_des])
         ref_nr = jnp.array([x_des, y_des, z_des, yaw_des])  # Reference position setpoint for NR tracker (x, y, z, yaw)
-        return ref_lqr_planar, ref_lqr_3D, ref_nr  
+        return ref_nr  
 
     def control_administrator(self) -> None:
         self.time_from_start = time.time() - self.T0
         print(f"\nIn control administrator at {self.time_from_start:.2f} seconds")
-        ref_lqr_planar, ref_lqr_3D, ref_nr = self.get_ref(self.time_from_start)
+        ref_nr = self.get_ref(self.time_from_start)
 
         ctrl_T0 = time.time()
         NR_new_u, _ = NR_tracker_original(self.nr_state_vector, self.last_input, ref_nr, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
         print(f"Time taken for NR tracker: {time.time() - ctrl_T0:.4f} seconds")
 
         rta_T0 = time.time()
-        rta_new_u_planar = self.rta_mm_gpr_administrator(ref_lqr_planar, self.rta_mm_gpr_state_vector_planar, self.last_input[0:2], self.output_vector)  # Compute RTA-MM GPR control input for planar system
-        print(f"Time taken for RTA-MM GPR tracker: {time.time() - rta_T0:.4f} seconds")
+        rta_new_u_planar = self.rta_mm_gpr_administrator(self.rta_mm_gpr_state_vector_planar, self.last_input[0:2])  # Compute RTA-MM GPR control input for planar system
+        print(f"Time taken for RTA-MM GPR administrator: {time.time() - rta_T0:.4f} seconds")
         control_comp_time = time.time() - ctrl_T0 # Time taken for control computation
         print(f"\nEntire control Computation Time: {control_comp_time:.4f} seconds, Good for {1/control_comp_time:.2f}Hz control loop")
 
@@ -557,7 +555,7 @@ class OffboardControl(Node):
                 print(f"{A.shape=}, {B.shape=}, {self.feedback_K.shape=}")
                 print(f"{'=' * 60}\n\n")
 
-    def rta_mm_gpr_administrator(self, ref, state, input, output):
+    def rta_mm_gpr_administrator(self, state, input):
         """Run the RTA-MM administrator to compute the control inputs."""
         self.time_from_start = time.time() - self.T0 # Update time from start of the program
         print(f"\nIn RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
