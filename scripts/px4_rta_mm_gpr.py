@@ -1,12 +1,20 @@
-import sys
 import os
+import sys
+
 import rclpy # Import ROS2 Python client library
 from rclpy.node import Node # Import Node class from rclpy to create a ROS2 node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy # Import ROS2 QoS policy modules
+from rclpy.qos import (QoSProfile,
+                       ReliabilityPolicy,
+                       HistoryPolicy,
+                       DurabilityPolicy) # Import ROS2 QoS policy modules
 
-from px4_msgs.msg import OffboardControlMode, VehicleCommand #Import basic PX4 ROS2-API messages for switching to offboard mode
-from px4_msgs.msg import TrajectorySetpoint, ActuatorMotors, VehicleThrustSetpoint, VehicleTorqueSetpoint, VehicleRatesSetpoint # Msgs for sending setpoints to the vehicle in various offboard modes
-from px4_msgs.msg import VehicleOdometry, VehicleStatus, RcChannels #Import PX4 ROS2-API messages for receiving vehicle state information
+from mocap_msgs.msg import FullState
+
+from px4_msgs.msg import(
+    OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
+    TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
+    VehicleStatus, RcChannels #Import PX4 ROS2-API messages for receiving vehicle state information
+)
 
 import time
 import traceback
@@ -26,7 +34,7 @@ import jax.numpy as jnp
 import immrax as irx
 import control
 from functools import partial
-from Logger import Logger, LogType, VectorLogType, install_shutdown_logging
+from Logger import Logger, LogType, VectorLogType, install_shutdown_logging # pyright: ignore[reportMissingImports]
 
 
 # Some configurations
@@ -52,8 +60,6 @@ actual_disturbance_GP = TVGPR(jnp.hstack((jnp.zeros((GP_instantiation_values.sha
                                        epsilon=0.1,
                                        discrete=False
                                        )
-
-
 
 
 
@@ -122,18 +128,12 @@ class OffboardControl(Node):
             VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
         self.trajectory_setpoint_publisher = self.create_publisher(
             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
-        self.actuator_motors_publisher = self.create_publisher(
-            ActuatorMotors, '/fmu/in/actuator_motors', qos_profile)
-        self.vehicle_thrust_setpoint_publisher = self.create_publisher(
-            VehicleThrustSetpoint, '/fmu/in/vehicle_thrust_setpoint', qos_profile)
-        self.vehicle_torque_setpoint_publisher = self.create_publisher(
-            VehicleTorqueSetpoint, '/fmu/in/vehicle_torque_setpoint', qos_profile)
         self.vehicle_rates_setpoint_publisher = self.create_publisher(
             VehicleRatesSetpoint, '/fmu/in/vehicle_rates_setpoint', qos_profile)
 
         # Create subscribers
-        self.vehicle_odometry_subscriber = self.create_subscription( #subscribes to odometry data (position, velocity, attitude)
-            VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odometry_subscriber_callback, qos_profile)
+        self.vehicle_odometry_subscriber = self.create_subscription(
+            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile)
         self.vehicle_status_subscriber = self.create_subscription(
             VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_subscriber_callback, qos_profile)
             
@@ -556,85 +556,6 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher.publish(msg)
         self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
-
-
-    def publish_actuator_setpoint(self, m0: float = 0.0, m1: float = 0.0, m2: float = 0.0, m3: float = 0.0) -> None:
-
-        """Publish the actuator setpoint.
-
-        Args:
-            m0 (float): Desired throttle for motor 0.
-            m1 (float): Desired throttle for motor 1.
-            m2 (float): Desired throttle for motor 2.
-            m3 (float): Desired throttle for motor 3.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If m0, m1, m2, or m3 are not within 0-1.
-        """
-        for name, val in zip(("m0", "m1", "m2", "m3"), (m0, m1, m2, m3)):
-            if not (0 <= val <= 1):
-                raise ValueError(
-                                f"\n{'=' * 60}"
-                                f"\nInvalid input for {name}\n"
-                                f"Expected value between 0 and 1\n"
-                                f"Received {val}\n"
-                                f"{'=' * 60}"
-                                )        
-
-        msg = ActuatorMotors()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        # 0th motor seems to be back left motor when we're aligned with quad's 0 yaw position
-        # 1st motor seems to be front right motor when we're aligned with quad's 0 yaw position
-        # 2nd motor seems to be back right motor when we're aligned with quad's 0 yaw position
-        # 3rd motor seems to be front left motor when we're aligned with quad's 0 yaw position
-        msg.control = [m0, m1, m2, m3] + 8 * [0.0]
-        self.actuator_motors_publisher.publish(msg)
-        self.get_logger().info(f"Publishing actuator setpoints: {msg.control}")
-
-    def publish_force_moment_setpoint(self, f: float = 0.0, M: list[float] = [0.0, 0.0, 0.0]) -> None:
-        """Publish the force and moment setpoint.
-        
-        Args:
-            f (float): Desired force in Newtons.
-            M (float): Desired moment in Newtons.
-        
-        Returns:
-            None
-                    
-        Raises:
-            ValueError: If f is not within 0-1 or M is not within -1 to 1.
-        """
-        if not (0 <= f <= 1):
-            raise ValueError(
-                            f"\n{'=' * 60}"
-                            f"\nInvalid input for force\n"
-                            f"Expected value between 0 and 1\n"
-                            f"Received {f}\n"
-                            f"{'=' * 60}"
-                            )
-        if not all(-1 <= m <= 1 for m in M):
-            raise ValueError(
-                            f"\n{'=' * 60}"
-                            f"\nInvalid input for moment\n"
-                            f"Expected values between -1 and 1 for each component\n"
-                            f"Received {M}\n"
-                            f"{'=' * 60}"
-                            )
-        
-        msg1 = VehicleThrustSetpoint()
-        msg1.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg1.xyz = [0.,0.,-1.0]  # Thrust in Newtons
-        self.vehicle_thrust_setpoint_publisher.publish(msg1)
-        self.get_logger().info(f"Publishing thrust setpoint: {msg1.xyz}")
-
-        msg2 = VehicleTorqueSetpoint()
-        msg2.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg2.xyz = [0.0, 0.0, 0.0]  # Torque in Newton-meters
-        self.vehicle_torque_setpoint_publisher.publish(msg2)
-        self.get_logger().info(f"Publishing torque setpoint: {msg2.xyz}")
 
     def publish_body_rate_setpoint(self, throttle: float = 0.0, p: float = 0.0, q: float = 0.0, r: float = 0.0) -> None:
         """Publish the body rate setpoint.
