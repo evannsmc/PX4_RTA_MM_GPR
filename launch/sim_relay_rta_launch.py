@@ -11,5 +11,13 @@ def generate_launch_description():
         output='screen',
     )
 
+    rta_mm_gpr = Node(
+        package='px4_rta_mm_gpr',
+        executable='px4_rta_mm_gpr',
+        output='screen',
+        arguments=['--sim', '--log-file', 'log.log']
+    )
+
     ld.add_action(full_state_relay)
+    ld.add_action(rta_mm_gpr)
     return ld
