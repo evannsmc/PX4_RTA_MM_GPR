@@ -15,11 +15,11 @@ def get_gp_mean(GP, t, x) :
 
 ## JIT: Get input from rollout feedforward input and error between rollout reference with LQR feedback
 @jit
-def u_applied(x, xref, uref, K_feedback):
+def u_applied(x, xref, uref, K_feedback, ulim):
     error = x - xref  # Compute the error between the reference and the current state
     u_fb = -K_feedback @ error
     u_total = u_fb + uref 
-    u_clipped = jnp.clip(u_total, ulim_planar.lower, ulim_planar.upper)  # Clip the control input to the limits
+    u_clipped = jnp.clip(u_total, ulim.lower, ulim.upper)  # Clip the control input to the limits
     return u_clipped
  
 ## JIT: Collection idx function
@@ -40,8 +40,8 @@ def collection_id_jax(xref, xemb, threshold=0.3):
 
 
 ## JIT: Rollout function
-@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mjacM, MASS):
+@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys):
     def mean_disturbance (t, x) :
             return GP.mean(jnp.hstack((t, x[1]))).reshape(-1)    
 
@@ -59,7 +59,7 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         error = xt_ref - jnp.array([0., -0.7, 0., 0., 0.])  # Compute the error between the reference and the current state
         nominal = -K_reference @ error  # Compute the nominal input based on the reference state and feedback gain
         uG = nominal + jnp.array([MASS * GRAVITY, 0.0])  # Add the gravitational force to the nominal input
-        u_ref_clipped = jnp.clip(uG, ulim_planar.lower, ulim_planar.upper)  # Clip the reference input to the input saturation limits
+        u_ref_clipped = jnp.clip(uG, ulim.lower, ulim.upper)  # Clip the reference input to the input saturation limits
 
 
         # jax.debug.print("xt_ref: {xt}, u_reference: {ur}, u_ref_clipped: {uc}", xt=xt_ref, ur=u_reference, uc=u_ref_clipped)
@@ -72,11 +72,11 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         sigma_lip = MS @ x_div.T # Lipschitz constant for sigma function above
         w_diff = sigma_bruteforce_if(t, irx.ut2i(xt_emb)) # TODO: Explain
         w_diffint = irx.icentpert(0.0, w_diff.upper + sigma_lip.upper[1]) # TODO: Explain
-        wint = irx.interval(GP_mean_t) + w_diffint
+        wint = irx.interval(GP_mean_t) + w_diffint # type: ignore
 
         
         # Compute the mixed Jacobian inclusion matrix for the system dynamics function and the disturbance function
-        Mt, Mx, Mu, Mw = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim_planar, wint,
+        Mt, Mx, Mu, Mw = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint,
                                     centers=((jnp.array([t]), xt_ref, u_ref_clipped, GP_mean_t),), 
                                     permutations=(perm,))[0]
         
@@ -91,13 +91,13 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         
 
         # Embedding system for reachable tube overapproximation due to state/input/disturbance uncertainty around the quad_sys_planar.f reference system under K_ref
-        F = lambda t, x, u, w: (Mx + Mu@K_feed + Mw@MG)@(x - xt_ref) + Mw@w_diffint + quad_sys_planar.f(0., xt_ref, u_ref_clipped, GP_mean_t) # with GP Jac
-        embsys = irx.ifemb(quad_sys_planar, F)
+        F = lambda t, x, u, w: (Mx + Mu@K_feed + Mw@MG)@(x - xt_ref) + Mw@w_diffint + quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t) # with GP Jac
+        embsys = irx.ifemb(quad_sys, F)
         xt_emb_p1 = xt_emb + dt*embsys.E(irx.interval(jnp.array([t])), xt_emb, u_ref_clipped, wint)
 
         # Move the reference forward in time as well
         # jax.debug.print("GPmean: {GP_mean}", GP_mean=GP_mean_t)
-        xt_ref_p1 = xt_ref + dt*quad_sys_planar.f(t, xt_ref, u_ref_clipped, GP_mean_t)
+        xt_ref_p1 = xt_ref + dt*quad_sys.f(t, xt_ref, u_ref_clipped, GP_mean_t)
 
         
         return ((xt_emb_p1, xt_ref_p1, MS), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
@@ -137,13 +137,7 @@ class PlanarMultirotorTransformed(irx.System) :
             -(u1/M) * jnp.cos(theta) + G*jnp.cos(theta) - (wz/M) * jnp.sin(theta), #vdot = -(u1/m)*cos(theta) + G*cos(theta) - (wz/m)*sin(theta)
             u2
         ])
-
-quad_sys_planar = PlanarMultirotorTransformed(mass=1.75)
-ulim_planar = irx.interval([0, -1],[21, 1]) # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
-Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
-R_planar = jnp.array([1, 1]) * jnp.eye(2)
-Q_ref_planar =jnp.array([20, 50, 500, 500, 1]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
-R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
+    
 
 ## JAX Linearization Function
 @partial(jit, static_argnums=0)
@@ -218,6 +212,7 @@ if __name__ == "__main__":
     
     # Initial conditions
     x0 = jnp.array([-1.5, -2., 0., 0., 0.1]) # [x1=py, x2=pz, x3=h, x4=v, x5=theta]
+    MASS = 1.75
     u0 = jnp.array([MASS*GRAVITY, 0.0]) # [u1=thrust, u2=roll angular rate]
     w0 = jnp.array([0.01]) # [w1= unkown horizontal wind disturbance]
     x0_pert = jnp.array([0.01, 0.01, 0.01, 0.01, 0.01])
@@ -226,22 +221,19 @@ if __name__ == "__main__":
     n_obs = 9
     obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(actual_disturbance_GP, 0.0, x0)[0]]]),(n_obs,1))
 
+    quad_sys_planar = PlanarMultirotorTransformed(mass=MASS)
+    ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
+    Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
+    R_planar = jnp.array([1, 1]) * jnp.eye(2)
+    Q_ref_planar =jnp.array([20, 50, 500, 500, 1]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+    R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
+
     A,B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
     K_reference, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)
     K_feedback, P, _ = control.lqr(A, B, Q_planar, R_planar)
 
-    # t0 = 0.     # Initial time
-    # dt = 0.01  # Time step
-    # T = 30.0   # Reachable tube horizon
-    # tt = jnp.arange(t0, T+dt, dt)
 
-    # sys_mjacM = irx.mjacM(quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
-    # perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)) # create a permutation for the inclusion system calculation
-
-
-
-    # , T, dt, perm, sys_mjacM):
-    reachable_tube, rollout_ref, rollout_feedfwd_input = rollout(0.0, ix0, x0, K_feedback, K_reference, obs, 30., 0.01, irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)), irx.mjacM(quad_sys_planar.f))
+    reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, obs, 30., 0.01, irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)), irx.mjacM(quad_sys_planar.f))
 
 
     n_obs = 9

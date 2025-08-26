@@ -48,8 +48,6 @@ actual_disturbance_GP = TVGPR(jnp.hstack((jnp.zeros((GP_instantiation_values.sha
                                        discrete=False
                                        )
 
-
-
 class OffboardControl(Node):
     def __init__(self, sim: bool) -> None:
         super().__init__('px4_rta_mm_gpr_node')
@@ -197,7 +195,7 @@ class OffboardControl(Node):
 
         @time_fns
         def jit_compile_linearize_system():
-            A, B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
+            A, B = jitted_linearize_system(self.quad_sys_planar, x0, u0, w0)
             return A, B
         
 
@@ -209,7 +207,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -223,7 +221,7 @@ class OffboardControl(Node):
  
         @time_fns
         def jit_compile_u_applied():
-            applied_u = u_applied(x0, x0, u0, K_feedback)
+            applied_u = u_applied(x0, x0, u0, K_feedback, self.ulim_planar)
             return applied_u
         
         
@@ -252,10 +250,19 @@ class OffboardControl(Node):
 
 
         # Initialize rollout parameters
+        self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
+        self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
+        self.Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
+        self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
+        self.Q_ref_planar =jnp.array([20, 50, 500, 500, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        self.R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
+
+
+
         t0 = 0.0  # Initial time
         self.tube_timestep = 0.01  # Time step
         self.tube_horizon = 30.0   # Reachable tube horizon
-        self.sys_mjacM = irx.mjacM(quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
+        self.sys_mjacM = irx.mjacM(self.quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
         self.perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)) # create a permutation for the inclusion system calculation
 
 
@@ -325,17 +332,17 @@ class OffboardControl(Node):
         if self.first_LQR:
             t00 = time.time()
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            A, B = jitted_linearize_system(quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise)
+            A, B = jitted_linearize_system(self.quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise)
             A, B = np.array(A), np.array(B)
             # print(f"Time to linearize system: {time.time() - t0} seconds")
 
             # t0 = time.time()
-            K, P, _ = control.lqr(A, B, Q_planar, R_planar)
+            K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             self.feedback_K = 1 * K
             # print(f"Time taken for LQR synthesis for K_feedback: {time.time() - t0} seconds")
 
             # t0 = time.time()
-            K, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)  # Compute the LQR gain matrix
+            K, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)  # Compute the LQR gain matrix
             self.reference_K = 1 * K  # Store the reference gain matrix
             # print(f"Time taken for LQR synthesis for K_reference: {time.time() - t0} seconds")
 
@@ -370,7 +377,7 @@ class OffboardControl(Node):
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
                     # t0 = time.time()  # Reset time for rollout computation
                     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS
+                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar
                     )
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
@@ -531,10 +538,10 @@ class OffboardControl(Node):
             print(f"\nUPDATING LQR")
             t0 = time.time()
             A, B = jitted_linearize_system(sys, state, input, noise)  # Linearize the system dynamics
-            K, P, _ = control.lqr(A, B, Q_planar, R_planar)
+            K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             self.feedback_K = 1 * K
 
-            K, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)  # Compute the LQR gain matrix
+            K, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)  # Compute the LQR gain matrix
             self.reference_K = 1 * K  # Store the reference gain matrix
             print(f"LQR Update time: {time.time()-t0}")
 
@@ -561,10 +568,10 @@ class OffboardControl(Node):
         # Re-linearize and re-compute the LQR gain every X seconds or when the yaw exceeds the maximum stray
         if (self.time_from_start - self.last_lqr_update_time) >= 2.5 or abs(self.yaw) > self.max_yaw_stray:  
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            self.update_lqr_feedback(quad_sys_planar, state, input, noise)
+            self.update_lqr_feedback(self.quad_sys_planar, state, input, noise)
 
         # Re-compute LQR input
-        applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K)
+        applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K, self.ulim_planar)
         self.traj_idx += 1 #update trajectory index
         print(f"{self.traj_idx=}")
         
