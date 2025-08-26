@@ -146,7 +146,7 @@ class OffboardControl(Node):
         # MoCap related variables
         self.mocap_initialized: bool = False
         self.full_rotations: int = 0
-        self.max_yaw_stray = 15 * np.pi / 180
+        self.max_yaw_stray = 5 * np.pi / 180
 
         # PX4 variables
         self.offboard_heartbeat_counter: int = 0
@@ -166,6 +166,33 @@ class OffboardControl(Node):
         self.rollout_timer = self.create_timer(self.control_period,
                                                self.rollout_callback) #My rollout function needs to execute at >= 100Hz
 
+        self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
+
+        self.last_lqr_update_time: float = 0.0  # Initialize last LQR update time
+        self.first_LQR: bool = True  # Flag to indicate if this is the first LQR update
+        self.collection_time: float = 0.0  # Time at which the collection starts
+
+        # Time variables
+        self.T0 = time.time() # (s) initial time of program
+        self.time_from_start = time.time() - self.T0 # (s) time from start of program 
+        self.begin_actuator_control = 15 # (s) time after which we start sending actuator control commands
+        self.land_time = self.begin_actuator_control + 20 # (s) time after which we start sending landing commands
+        if self.sim:
+            self.max_height = -12.5
+        else:
+            self.max_height = -2.5
+            # raise NotImplementedError("Hardware not implemented yet.")
+
+
+    def init_jit_compile_nr_rta(self):
+        """
+        Initialize JIT compilation for NR tracker and RTA pipeline.
+
+        You must run jit-compiled functions the first time before actually using them in order to trigger the JIT compilation.
+
+        Otherwise, you'll deploy code that hasn't yet been compiled, which can lead to runtime errors or suboptimal performance.
+        """
+        
         # Initialize newton-raphson algorithm parameters
         self.last_input: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.01, 0.01, 0.01]) # last input to the controller
         self.hover_input_planar: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.]) # hover input to the controller
@@ -253,31 +280,11 @@ class OffboardControl(Node):
         applied_u = u_applied(x0, x0, u0, K_feedback)
         print(f"Applied u: {applied_u} Time taken for u_applied after jit: {time.time() - time0} seconds")
 
-        self.last_lqr_update_time: float = 0.0  # Initialize last LQR update time
-        self.first_LQR: bool = True  # Flag to indicate if this is the first LQR update
-        self.collection_time: float = 0.0  # Time at which the collection starts
-
-        # Time variables
-        self.T0 = time.time() # (s) initial time of program
-        self.time_from_start = time.time() - self.T0 # (s) time from start of program 
-        self.begin_actuator_control = 15 # (s) time after which we start sending actuator control commands
-        self.land_time = self.begin_actuator_control + 20 # (s) time after which we start sending landing commands
-        if self.sim:
-            self.max_height = -12.5
-        else:
-            self.max_height = -2.5
-            # raise NotImplementedError("Hardware not implemented yet.")
-        # self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = reachable_tube, rollout_ref, rollout_feedfwd_input
-        # exit(0)
-
-    
-
     def rc_channel_subscriber_callback(self, rc_channels):
         """Callback function for RC Channels to create a software 'killswitch' depending on our flight mode channel (position vs offboard vs land mode)"""
         print('In RC Channel Callback')
         flight_mode = rc_channels.channels[self.MODE_CHANNEL-1] # +1 is offboard everything else is not offboard
         self.offboard_mode_rc_switch_on: bool = True if flight_mode >= 0.75 else False
-
 
     def adjust_yaw(self, yaw: float) -> float:
         """Adjust yaw angle to account for full rotations and return the adjusted yaw.
@@ -312,7 +319,6 @@ class OffboardControl(Node):
         self.prev_mocap_psi = mocap_psi
         
         return psi
-
 
     def vehicle_odometry_subscriber_callback(self, msg) -> None:
         """Callback function for vehicle odometry topic subscriber."""
@@ -392,7 +398,6 @@ class OffboardControl(Node):
             # print(f"{self.ROT = }")
         # print("done")
         # exit(0)
-
 
     def rollout_callback(self):
         """Callback function for the rollout timer."""
@@ -530,7 +535,6 @@ class OffboardControl(Node):
         self.offboard_control_mode_publisher.publish(msg)
         # self.get_logger().info("Switching to body rate control mode")
     
-
     def publish_position_setpoint(self, x: float = 0.0, y: float = 0.0, z: float = -3.0, yaw: float = 0.0) -> None:
         """Publish the trajectory setpoint.
 
@@ -642,9 +646,7 @@ class OffboardControl(Node):
                 self.engage_offboard_mode()
                 self.arm()
             self.offboard_heartbeat_counter += 1
-
-        
-        
+ 
     def control_algorithm_callback(self) -> None:
         """Callback function to handle control algorithm once in offboard mode."""
         self.time_from_start = time.time() - self.T0
@@ -779,6 +781,7 @@ class OffboardControl(Node):
                 print(f"{'=' * 60}\n\n")
 
     def lqr_administrator_planar(self, ref, state, input, output):
+        """
         self.time_from_start = time.time() - self.T0 # Update time from start of the program
         print(f"In LQR Administrator: {self.time_from_start=:.2f} and {self.last_lqr_update_time=:.2f}, difference: {self.time_from_start - self.last_lqr_update_time:.2f}")
         t0 = time.time()  # Start time for LQR computation
@@ -807,6 +810,8 @@ class OffboardControl(Node):
 
         print(f"Time taken for LQR computation: {time.time() - t0:.4f} seconds")
         return clipped
+        """
+        pass
 
     def rta_mm_gpr_administrator(self, ref, state, input, output):
         """Run the RTA-MM administrator to compute the control inputs."""
@@ -814,7 +819,7 @@ class OffboardControl(Node):
         print(f"\nIn RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
         t0 = time.time()  # Start time for RTA-MM GPR computation
 
-        if (self.time_from_start - self.last_lqr_update_time) >= 5.0 or self.first_LQR or abs(self.yaw) > self.max_yaw_stray:  # Re-linearize and re-compute the LQR gain X seconds
+        if (self.time_from_start - self.last_lqr_update_time) >= 2.5 or self.first_LQR or abs(self.yaw) > self.max_yaw_stray:  # Re-linearize and re-compute the LQR gain X seconds
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
             self.update_lqr_feedback(quad_sys_planar, state, input, noise)
 
