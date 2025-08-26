@@ -25,7 +25,7 @@ from functools import partial
 from scipy.spatial.transform import Rotation as R
 
 from px4_rta_mm_gpr.px4_functions import *
-from px4_rta_mm_gpr.utilities import test_function
+from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
 from px4_rta_mm_gpr.utilities import sim_constants # Import simulation constants
 from px4_rta_mm_gpr.jax_mm_rta import *
@@ -250,7 +250,6 @@ class OffboardControl(Node):
         # Initialize NR algorithm parameters
         self.last_input: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.01, 0.01, 0.01]) # last input to the controller
         self.hover_input_planar: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.]) # hover input to the controller
-        self.odom_counter = 0
         self.T_LOOKAHEAD: float = 0.8 # (s) lookahead time for the controller in seconds
         self.T_LOOKAHEAD_PRED_STEP: float = 0.1 # (s) we do state prediction for T_LOOKAHEAD seconds ahead in intervals of T_LOOKAHEAD_PRED_STEP seconds
         self.INTEGRATION_TIME: float = self.control_period # integration time constant for the controller in seconds
@@ -302,40 +301,6 @@ class OffboardControl(Node):
         flight_mode = rc_channels.channels[self.MODE_CHANNEL-1] # +1 is offboard everything else is not offboard
         self.offboard_mode_rc_switch_on: bool = True if flight_mode >= 0.75 else False
 
-    def adjust_yaw(self, yaw: float) -> float:
-        """Adjust yaw angle to account for full rotations and return the adjusted yaw.
-
-        This function keeps track of the number of full rotations both clockwise and counterclockwise, and adjusts the yaw angle accordingly so that it reflects the absolute angle in radians. It ensures that the yaw angle is not wrapped around to the range of -pi to pi, but instead accumulates the full rotations.
-        This is particularly useful for applications where the absolute orientation of the vehicle is important, such as in control algorithms or navigation systems.
-        The function also initializes the first yaw value and keeps track of the previous yaw value to determine if a full rotation has occurred.
-
-        Args:
-            yaw (float): The yaw angle in radians from the motion capture system after being converted from quaternion to euler angles.
-
-        Returns:
-            psi (float): The adjusted yaw angle in radians, accounting for full rotations.
-        """        
-        mocap_psi = yaw
-        psi = None
-
-        if not self.mocap_initialized:
-            self.mocap_initialized = True
-            self.prev_mocap_psi = mocap_psi
-            psi = mocap_psi
-            return psi
-
-        # MoCap angles are from -pi to pi, whereas the angle state variable should be an absolute angle (i.e. no modulus wrt 2*pi)
-        #   so we correct for this discrepancy here by keeping track of the number of full rotations.
-        if self.prev_mocap_psi > np.pi*0.9 and mocap_psi < -np.pi*0.9: 
-            self.full_rotations += 1  # Crossed 180deg in the CCW direction from +ve to -ve rad value so we add 2pi to keep it the equivalent positive value
-        elif self.prev_mocap_psi < -np.pi*0.9 and mocap_psi > np.pi*0.9:
-            self.full_rotations -= 1 # Crossed 180deg in the CW direction from -ve to +ve rad value so we subtract 2pi to keep it the equivalent negative value
-
-        psi = mocap_psi + 2*np.pi * self.full_rotations
-        self.prev_mocap_psi = mocap_psi
-        
-        return psi
-
     def vehicle_odometry_subscriber_callback(self, msg) -> None:
         """Callback function for vehicle odometry topic subscriber."""
         print(f"Received odometry data: {msg=}")
@@ -343,8 +308,7 @@ class OffboardControl(Node):
         print("==" * 30)
         self.x = msg.position[0]
         self.y = msg.position[1]
-        self.z = msg.position[2] #+ (2.25 * self.sim) # Adjust z for simulation, new gazebo model has ground level at around -1.39m 
-
+        self.z = msg.position[2] + (1.0 * self.sim) # Adjust z for simulation, new gazebo model has ground level at around -1.39m 
         self.vx = msg.velocity[0]
         self.vy = msg.velocity[1]
         self.vz = msg.velocity[2]
@@ -353,36 +317,34 @@ class OffboardControl(Node):
         self.ay = msg.acceleration[1]
         self.az = msg.acceleration[2]
 
-        self.msg_quatval = msg.quaternion
+        self.roll, self.pitch, yaw = R.from_quat(msg.quaternion, scalar_first=True).as_euler('xyz', degrees=False)
+        self.yaw = adjust_yaw(self, yaw)  # Adjust yaw to account for full rotations
+        self.rotation_object = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
+        self.quat = self.rotation_object.as_quat()  # Quaternion representation (xyzw)
 
         self.p = msg.angular_velocity[0]
         self.q = msg.angular_velocity[1]
         self.r = msg.angular_velocity[2]
 
 
-        self.roll, self.pitch, yaw = R.from_quat(msg.quaternion, scalar_first=True).as_euler('xyz', degrees=False)
-        self.yaw = self.adjust_yaw(yaw)  # Adjust yaw to account for full rotations
-        r_final = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
-        self.rotation_object = r_final  # Store the final rotation object for further use
 
 
-        self.full_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw, self.p, self.q, self.r])
+
+        self.full_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.ax, self.ay, self.az, self.roll, self.pitch, self.yaw, self.p, self.q, self.r])
         self.nr_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw])
         self.flat_state_vector = np.array([self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.vz, 0., 0., 0., 0., 0.])
         self.rta_mm_gpr_state_vector_planar = np.array([self.y, self.z, self.vy, self.vz, self.roll])# px, py, h, v, theta = x
         self.output_vector = np.array([self.x, self.y, self.z, self.yaw])
         self.position = np.array([self.x, self.y, self.z])
         self.velocity = np.array([self.vx, self.vy, self.vz])
-        self.quat = self.rotation_object.as_quat()  # Quaternion representation (xyzw)
+        self.acceleration = np.array([self.ax, self.ay, self.az])
         self.ROT = self.rotation_object.as_matrix()
         self.omega = np.array([self.p, self.q, self.r])
 
         print(f"in odom, flat output: {self.output_vector}")
         if self.first_LQR:
-            self.odom_counter += 1
             t00 = time.time()
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            # t0 = time.time()
             A, B = jitted_linearize_system(quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise)
             A, B = np.array(A), np.array(B)
             # print(f"Time to linearize system: {time.time() - t0} seconds")
@@ -401,18 +363,14 @@ class OffboardControl(Node):
             self.last_lqr_update_time = time.time() - self.T0  # Set the last LQR update time to the current time
             print(f"Odom: time taken for entire LQR update: {time.time() - t00} seconds")
 
-            # if self.odom_counter > 5:
-            #     exit(0)
+
+
         ODOMETRY_DEBUG_PRINT = True
         if ODOMETRY_DEBUG_PRINT:
-            # print(f"{self.full_state_vector=}")
             print(f"{self.nr_state_vector=}")
-            # print(f"{self.flat_state_vector=}")
             print(f"{self.output_vector=}")
             print(f"{self.roll = }, {self.pitch = }, {self.yaw = }(rads)")
-            # print(f"{self.rotation_object.as_euler('xyz', degrees=True) = } (degrees)")
-            # print(f"{self.ROT = }")
-        # print("done")
+
         # exit(0)
 
     def rollout_callback(self):
@@ -430,7 +388,7 @@ class OffboardControl(Node):
 
                 if current_time >= self.collection_time:
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
-                    t0 = time.time()  # Reset time for rollout computation
+                    # t0 = time.time()  # Reset time for rollout computation
                     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
                         current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM
                     )
@@ -449,20 +407,16 @@ class OffboardControl(Node):
                     print(f"{self.collection_time=}\n{safety_horizon=}")
 
                     self.traj_idx = 0
-                    # print(f"{self.reachable_tube.shape = }")
                     self.save_tube = self.reachable_tube[::100]
-                    # print(f"{self.save_tube.shape = }")
-                    # print(f"{self.save_tube=  }")
-                    # exit(0)
 
                 else:
                     print("You're safe!")
                 print(f"Time taken for whole rollout process: {time.time() - t00:.4f} seconds")
 
 
-            except AttributeError as e:
-                print("Ignoring missing attribute:", e)
-                return
+            # except AttributeError as e: # for if we 
+            #     print("Ignoring missing attribute:", e)
+            #     return
             except Exception as e:
                 raise  # Re-raise all other types of exceptions            
         else:
@@ -472,25 +426,24 @@ class OffboardControl(Node):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
 
-
     def offboard_heartbeat_signal_callback(self) -> None:
         """Callback function for the heartbeat signals that maintains flight controller in offboard mode and switches between offboard flight modes."""
         self.time_from_start = time.time() - self.T0
+        t = self.time_from_start
         print(f"In offboard callback at {self.time_from_start:.2f} seconds")
 
         if not self.offboard_mode_rc_switch_on: #integration of RC 'killswitch' for offboard to send heartbeat signal, engage offboard, and arm
             print(f"Offboard Callback: RC Flight Mode Channel {self.MODE_CHANNEL} Switch Not Set to Offboard (-1: position, 0: offboard, 1: land) ")
             self.offboard_heartbeat_counter = 0
-            return
+            return # skip the rest of this function if RC switch is not set to offboard
 
-        if self.time_from_start <= self.begin_actuator_control:
+        if t < self.begin_actuator_control:
             publish_offboard_control_heartbeat_signal_position(self)
-        elif self.time_from_start <= self.land_time:  
+        elif t < self.land_time:  
             publish_offboard_control_heartbeat_signal_body_rate(self)
-        elif self.time_from_start > self.land_time:
-            publish_offboard_control_heartbeat_signal_position(self)
         else:
-            raise ValueError("Unexpected time_from_start value")
+            publish_offboard_control_heartbeat_signal_position(self)
+
 
         if self.offboard_heartbeat_counter <= 10:
             if self.offboard_heartbeat_counter == 10:
@@ -498,28 +451,22 @@ class OffboardControl(Node):
                 arm(self)
             self.offboard_heartbeat_counter += 1
 
-
-
-
     def control_algorithm_callback(self) -> None:
         """Callback function to handle control algorithm once in offboard mode."""
         self.time_from_start = time.time() - self.T0
+        t = self.time_from_start
         if not (self.offboard_mode_rc_switch_on and (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD) ):
             print(f"Not in offboard mode.\n"
                   f"Current nav_state number: {self.vehicle_status.nav_state}\n"
                   f"nav_state number for offboard: {VehicleStatus.NAVIGATION_STATE_OFFBOARD}\n"
                   f"Offboard RC switch status: {self.offboard_mode_rc_switch_on}")
-            return
+            return  # skip the rest of this function if not in offboard mode
 
-        if self.time_from_start <= self.begin_actuator_control:
+        if t < self.begin_actuator_control:
             publish_position_setpoint(self, 0., 4.0, self.max_height, 0.0)
-
-        elif self.time_from_start <= self.land_time:
-            # f, M = self.control_administrator()
-            # self.publish_force_moment_setpoint(f, M)
+        elif t < self.land_time:
             self.control_administrator()
-
-        elif self.time_from_start > self.land_time or (abs(self.z) <= 1.5 and self.time_from_start > 20):
+        elif t > self.land_time or (abs(self.z) <= 1.5 and t > 20):
             print("Landing...")
             publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
             if abs(self.x) < 0.2 and abs(self.y) < 0.2 and abs(self.z) <= 0.85:
@@ -527,9 +474,8 @@ class OffboardControl(Node):
                 land(self)
                 disarm(self)
                 exit(0)
-
         else:
-            raise ValueError("Unexpected time_from_start value")
+            raise ValueError("Unexpected time_from_start value or unexpected termination conditions")
 
     def get_ref(self, time_from_start: float) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Get the reference trajectory for the LQR and NR tracker.
@@ -562,32 +508,21 @@ class OffboardControl(Node):
         self.time_from_start = time.time() - self.T0
         print(f"\nIn control administrator at {self.time_from_start:.2f} seconds")
         ref_lqr_planar, ref_lqr_3D, ref_nr = self.get_ref(self.time_from_start)
-        ctrl_T0 = time.time()
 
+        ctrl_T0 = time.time()
         NR_new_u, _ = NR_tracker_original(self.nr_state_vector, self.last_input, ref_nr, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
         print(f"Time taken for NR tracker: {time.time() - ctrl_T0:.4f} seconds")
-        # LQR_new_u_planar = self.lqr_administrator_planar(ref_lqr_planar, self.rta_mm_gpr_state_vector_planar, self.last_input[0:2], self.output_vector)  # Compute LQR control input for planar system
-        # LQR_new_u_3D = self.lqr_administrator_3D(ref_lqr_3D, self.nr_state_vector, self.last_input, self.output_vector)  # Compute LQR control input
-        rta_new_u_planar = self.rta_mm_gpr_administrator(ref_lqr_planar, self.rta_mm_gpr_state_vector_planar, self.last_input[0:2], self.output_vector)  # Compute RTA-MM GPR control input for planar system
 
+        rta_T0 = time.time()
+        rta_new_u_planar = self.rta_mm_gpr_administrator(ref_lqr_planar, self.rta_mm_gpr_state_vector_planar, self.last_input[0:2], self.output_vector)  # Compute RTA-MM GPR control input for planar system
+        print(f"Time taken for RTA-MM GPR tracker: {time.time() - rta_T0:.4f} seconds")
         control_comp_time = time.time() - ctrl_T0 # Time taken for control computation
         print(f"\nEntire control Computation Time: {control_comp_time:.4f} seconds, Good for {1/control_comp_time:.2f}Hz control loop")
 
-
         print(f"{NR_new_u =}")
-        # print(f"{LQR_new_u_planar =}")
-        # print(f"{LQR_new_u_3D =}")  
         print(f"{rta_new_u_planar =}")
-
-        # new_u = np.hstack([LQR_new_u_planar, NR_new_u[2:]])  # New control input from the LQR tracker
         new_u = jnp.hstack([rta_new_u_planar, NR_new_u[2:]])  # New control input from the RTA-MM GPR tracker
-        # new_u = np.hstack([LQR_new_u, NR_new_u[2:]])  # New control input from the NR tracker
-        # new_u = LQR_new_u  # Use the LQR control input directly
         print(f"{new_u = }")
-        # exit(0)
-        # if self.traj_idx > 11:
-        #     print(f"Trajectory index {self.traj_idx} exceeded limit, stopping control.")
-        #     exit(0)
 
         self.last_input = new_u  # Update the last input for the next iteration
         new_force = new_u[0]
@@ -639,27 +574,29 @@ class OffboardControl(Node):
         """Run the RTA-MM administrator to compute the control inputs."""
         self.time_from_start = time.time() - self.T0 # Update time from start of the program
         print(f"\nIn RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
-        t0 = time.time()  # Start time for RTA-MM GPR computation
 
-        if (self.time_from_start - self.last_lqr_update_time) >= 2.5 or self.first_LQR or abs(self.yaw) > self.max_yaw_stray:  # Re-linearize and re-compute the LQR gain X seconds
+        t0 = time.time()  # Start time for RTA-MM GPR computation
+        current_state = self.rta_mm_gpr_state_vector_planar # Get the current state vector
+
+        # Re-linearize and re-compute the LQR gain every X seconds or when the yaw exceeds the maximum stray
+        if (self.time_from_start - self.last_lqr_update_time) >= 2.5 or abs(self.yaw) > self.max_yaw_stray:  
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
             self.update_lqr_feedback(quad_sys_planar, state, input, noise)
 
-        current_state = self.rta_mm_gpr_state_vector_planar
-        current_state_interval = irx.icentpert(current_state, self.x_pert)
+        # Re-compute LQR input
         applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K)
-        self.traj_idx += 1
+        self.traj_idx += 1 #update trajectory index
         print(f"{self.traj_idx=}")
+        
         self.y_ref = self.rollout_ref[self.traj_idx, 0]
         self.z_ref = self.rollout_ref[self.traj_idx, 1]
-        self.vy_ref = self.rollout_ref[self.traj_idx, 2]
-        self.vz_ref = self.rollout_ref[self.traj_idx, 3]
+        # self.vy_ref = self.rollout_ref[self.traj_idx, 2]
+        # self.vz_ref = self.rollout_ref[self.traj_idx, 3]
         self.yaw_ref = self.rollout_ref[self.traj_idx, 4]
 
-        PRINT_RTA_DEBUG = True  # Set to True to print debug information for RTA-MM GPR
+        PRINT_RTA_DEBUG = False  # Set to True to print debug information for RTA-MM GPR
         if PRINT_RTA_DEBUG:
             print(f"{current_state=}")
-            print(f"{current_state_interval=}")
             print(f"{self.rollout_ref[self.traj_idx, :] =}")
             print(f"{self.rollout_feedfwd_input[self.traj_idx, :] =}")
             print(f"{applied_input=}")
@@ -693,38 +630,6 @@ class OffboardControl(Node):
         else:
             raise ValueError("self.sim must be True or False, not None")  # Ensure sim is set to True or False before calling this function
     
-
-
-    # def lqr_administrator_3D(self, ref, state, input, output):
-    #     if self.time_from_start % 1 == 0:  # Re-linearize and re-compute the LQR gain every X seconds
-    #         A, B = jitted_linearize_system(quad_sys_3D, state, input, jnp.array([0.0]))  # Linearize the system dynamics
-    #         K, P, _ = control.lqr(A, B, Q_3D, R_3D)
-    #         self.feedback_K = 1 * K
-
-    #     error = ref - state  # Compute the error between the reference and the current state
-    #     nominal = self.feedback_K @ error
-    #     nominalG = nominal + jnp.array([sim_constants.MASS * sim_constants.GRAVITY, 0.0, 0., 0.,])  # Add gravity compensation
-    #     clipped = jnp.clip(nominalG, ulim_3D.lower, ulim_3D.upper)
-
-    #     PRINT_LQR_DEBUG = False  # Set to True to print debug information for LQR
-    #     if PRINT_LQR_DEBUG:
-    #         print(f"\n\n{'=' * 60}")
-    #         print(f"Linearized System Matrices:\n{A=}\n{B=}")
-    #         print(f"LQR Gain Matrix:\n{K=}")
-    #         print(f"Feedback Gain Matrix:\n{self.feedback_K}")
-    #         print(f"{A.shape=}, {B.shape=}, {self.feedback_K.shape=}")
-    #         print(f"Current State:\n{state=}")
-    #         print(f"Reference:\n{ref=}")
-    #         print(f"Error:\n{error}")
-
-    #         print(f"Nominal Control Input (before clipping): {nominal}")
-    #         print(f"Nominal Control Input with Gravity Compensation: {nominalG}")
-    #         print(f"{ulim_3D.lower=}, {ulim_3D.upper=}")
-    #         print(f"Clipped Control Input: {clipped}")
-    #         print(f"{'=' * 60}\n\n")
-
-    #     return clipped
-
 # ~~ The following functions handle the log update and data retrieval for analysis ~~
     def update_logged_data(self, data):
         print("Updating Logged Data")

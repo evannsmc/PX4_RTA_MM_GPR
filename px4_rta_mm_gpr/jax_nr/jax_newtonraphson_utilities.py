@@ -147,7 +147,7 @@ def fake_tracker(currstate, currinput, ref, T_lookahead, lookahead_step, integra
 @jit
 def NR_tracker_original(currstate, currinput, ref, T_lookahead, lookahead_step, integration_step, mass):
     """Standard Newton-Raphson method to track the reference trajectory with forward euler integration of dynamics for prediction."""
-    alpha = jnp.array([20, 30, 30, 30])
+    alpha = jnp.array([20, 30, 30, 50])
     pred = predict_output(currstate, currinput, T_lookahead, lookahead_step, mass)
     error = get_tracking_error(ref, pred) # calculates tracking error
     # dgdu = get_jac_pred_u(currstate, currinput, T_lookahead, lookahead_step, mass)
