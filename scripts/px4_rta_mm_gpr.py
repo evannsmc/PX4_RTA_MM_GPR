@@ -7,7 +7,6 @@ from rclpy.qos import (QoSProfile,
                        ReliabilityPolicy,
                        HistoryPolicy,
                        DurabilityPolicy) # Import ROS2 QoS policy modules
-
 from mocap4r2_msgs.msg import FullState
 from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
@@ -19,8 +18,10 @@ import time
 import traceback
 from typing import Optional
 
-import numpy as np  
+import control
 import math as m
+import numpy as np  
+from functools import partial
 from scipy.spatial.transform import Rotation as R
 
 from px4_rta_mm_gpr.utilities import test_function
@@ -31,8 +32,6 @@ from px4_rta_mm_gpr.jax_mm_rta import *
 import jax
 import jax.numpy as jnp
 import immrax as irx
-import control
-from functools import partial
 from Logger import Logger, LogType, VectorLogType, install_shutdown_logging # pyright: ignore[reportMissingImports]
 
 
@@ -192,8 +191,62 @@ class OffboardControl(Node):
 
         Otherwise, you'll deploy code that hasn't yet been compiled, which can lead to runtime errors or suboptimal performance.
         """
+
+        def time_fns(func):
+            def wrapper(*args, **kwargs):
+                time0 = time.time()
+                result1 = func(*args, **kwargs)
+                time1 = time.time()
+                result2 = func(*args, **kwargs)
+                time2 = time.time()
+
+                tf1 = time1 - time0
+                tf2 = time2 - time1
+                speedup_factor = tf1 / tf2 if tf2 != 0 else 0
+                print(f"\nTime taken for {func.__name__}: {time1 - time0}")
+                print(f"Time taken for {func.__name__} (JIT): {time2 - time1}")
+                print(f"Speedup factor for {func.__name__} (JIT): {speedup_factor}\n")
+
+                return result2
+            return wrapper
         
-        # Initialize newton-raphson algorithm parameters
+        @time_fns
+        def jit_compile_nr_tracker():
+            NR_tracker_original(init_state, init_input, init_ref, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS) # JIT-compile the NR tracker function
+
+        @time_fns
+        def jit_compile_linearize_system():
+            A, B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
+            return A, B
+        
+
+        @time_fns
+        def jit_compile_lqr():
+            K_reference, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)
+            K_feedback, P, _ = control.lqr(A, B, Q_planar, R_planar)
+            return K_feedback, K_reference
+    
+        @time_fns
+        def jit_compile_rollout():
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM)
+            reachable_tube.block_until_ready()
+            rollout_ref.block_until_ready()
+            rollout_feedfwd_input.block_until_ready()
+            return reachable_tube, rollout_ref, rollout_feedfwd_input
+        
+    
+        @time_fns
+        def jit_compile_collection_id():
+            violation_safety_time_idx = collection_id_jax(rollout_ref, reachable_tube)
+            return violation_safety_time_idx
+ 
+        @time_fns
+        def jit_compile_u_applied():
+            applied_u = u_applied(x0, x0, u0, K_feedback)
+            return applied_u
+        
+        
+        # Initialize NR algorithm parameters
         self.last_input: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.01, 0.01, 0.01]) # last input to the controller
         self.hover_input_planar: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.]) # hover input to the controller
         self.odom_counter = 0
@@ -201,84 +254,46 @@ class OffboardControl(Node):
         self.T_LOOKAHEAD_PRED_STEP: float = 0.1 # (s) we do state prediction for T_LOOKAHEAD seconds ahead in intervals of T_LOOKAHEAD_PRED_STEP seconds
         self.INTEGRATION_TIME: float = self.control_period # integration time constant for the controller in seconds
 
-        # NR tracker JIT-compile
+        # Initialize state, input, noise, ref variables
         init_state = jnp.array([0.1, 0.1, 0.1, 0.02, 0.03, 0.02, 0.01, 0.01, 0.03]) # Initial state vector for testing
         init_input = self.last_input  # Initial input vector for testing
         init_noise = jnp.array([0.01]) # [w1= unkown horizontal wind disturbance]
         init_ref = jnp.array([0.0, 0.0, -3.0, 0.0])  # Initial reference vector for testing
-        NR_tracker_original(init_state, init_input, init_ref, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS) # JIT-compile the NR tracker function
-
 
         # Initialize rta_mm_gpr variables
         n_obs = 9
         x0 = jnp.array(init_state[0:5])  # Initial state vector for testing
         self.obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(actual_disturbance_GP, 0.0, x0)[0]]]),(n_obs,1))
-
         self.x_pert = 1e-4 * jnp.array([1., 1., 1., 1., 1.])
         ix0 = irx.icentpert(x0, self.x_pert)
         u0 = jnp.array(init_input[0:2])  # Initial input vector for testing
         w0 = jnp.array(init_noise)  # Initial noise vector for testing
         print(f"{x0=}, {ix0=}, {ix0.shape=}")
 
-        # JIT-compile the linearization system function and do LQR control for ref and feedback
-        time0 = time.time()
-        A, B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
-        print(f"{A=},{B=}")
-        print(f"Time taken for linearization {time.time() - time0}\n")
 
-        time0 = time.time()
-        A, B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
-        print(f"{A=},{B=}")
-        print(f"Time taken for linearization after jit {time.time() - time0}")
-
-        # Do LQR
-        time0 = time.time()
-        K_reference, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)
-        K_feedback, P, _ = control.lqr(A, B, Q_planar, R_planar)
-        print(f"{K_feedback= }, {K_reference=}, Time taken for LQR: {time.time() - time0}")
-
-        time0 = time.time()
-        K_reference, P, _ = control.lqr(A, B, Q_ref_planar, R_ref_planar)
-        K_feedback, P, _ = control.lqr(A, B, Q_planar, R_planar)
-        print(f"{K_feedback= }, {K_reference=}, Time taken for LQR part 2: {time.time() - time0}")
-
-        # Set up rollout parameters
+        # Initialize rollout parameters
         t0 = 0.0  # Initial time
         self.tube_timestep = 0.01  # Time step
         self.tube_horizon = 30.0   # Reachable tube horizon
         self.sys_mjacM = irx.mjacM(quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
         self.perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)) # create a permutation for the inclusion system calculation
 
-        # JIT-compile rollout and collection_id_jax functions
-        time0 = time.time()
-        reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM) # JIT compile the rollout function for performance
-        reachable_tube.block_until_ready()
-        rollout_ref.block_until_ready()
-        rollout_feedfwd_input.block_until_ready()
-        print(f"Time taken for rollout: {time.time() - time0} seconds")
 
-        time0 = time.time()
-        reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM)
-        reachable_tube.block_until_ready()
-        rollout_ref.block_until_ready()
-        rollout_feedfwd_input.block_until_ready()
-        print(f"Time taken for rollout after jit : {time.time() - time0} seconds")
 
-        time0 = time.time()
-        violation_safety_time_idx = collection_id_jax(rollout_ref, reachable_tube)
-        print(f"Collection ID: {violation_safety_time_idx}, Time taken for collection_id: {time.time() - time0}")
+        jit_compile_nr_tracker() # JIT-compile NR tracker
+        A, B = jit_compile_linearize_system() # JIT-compile linearize system
+        K_feedback, K_reference = jit_compile_lqr() # LQR JIT-compile
+        reachable_tube, rollout_ref, rollout_feedfwd_input = jit_compile_rollout() # JIT-compile rollout
+        violation_safety_time_idx = jit_compile_collection_id()
+        applied_u = jit_compile_u_applied()
 
-        time0 = time.time()
-        violation_safety_time_idx = collection_id_jax(rollout_ref, reachable_tube)
-        print(f"Collection ID: {violation_safety_time_idx}, Time taken for collection_id after jit: {time.time()-time0}")
+        print(f"{A=},{B=}")
+        print(f"{K_feedback=}\n{K_reference=}")
+        print(f"{reachable_tube=},{rollout_ref=},{rollout_feedfwd_input=}")
+        print(f"Collection ID: {violation_safety_time_idx}")
+        print(f"Applied u: {applied_u}")
 
-        time0 = time.time()
-        applied_u = u_applied(x0, x0, u0, K_feedback)
-        print(f"Applied u: {applied_u} Time taken for u_applied: {time.time() - time0} seconds")
-
-        time0 = time.time()
-        applied_u = u_applied(x0, x0, u0, K_feedback)
-        print(f"Applied u: {applied_u} Time taken for u_applied after jit: {time.time() - time0} seconds")
+        # exit(0)
 
     def rc_channel_subscriber_callback(self, rc_channels):
         """Callback function for RC Channels to create a software 'killswitch' depending on our flight mode channel (position vs offboard vs land mode)"""
@@ -722,10 +737,10 @@ class OffboardControl(Node):
                                     0., self.y_ref, self.z_ref, self.yaw_ref,
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                                     ]
-        self.update_logged_data(state_input_ref_log_info)
-        for reach_set in self.save_tube:
-            # print(f"{reach_set}")
-            self.update_tube_data(reach_set)
+        # self.update_logged_data(state_input_ref_log_info)
+        # for reach_set in self.save_tube:
+        #     # print(f"{reach_set}")
+        #     self.update_tube_data(reach_set)
             # exit(0)
         print("==" * 30)
 
