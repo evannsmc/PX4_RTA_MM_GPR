@@ -1,7 +1,6 @@
 import math as m
 
 MASS: float = 1.75 # (kg) mass of the multirotor
-GRAVITY: float = 9.806 # (m/s^2) gravitational acceleration
 
 def get_throttle_command_from_force(collective_thrust) -> float: #Converts force to throttle command
     """ Convert the positive collective thrust force to a positive throttle command. """

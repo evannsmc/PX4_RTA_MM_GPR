@@ -10,22 +10,16 @@ from .TVGPR import(
 
 from . import mm_rta as mm_rta
 from .mm_rta import(
-    rollout,
     jitted_rollout,
     u_applied,
     get_gp_mean,
     collection_id_jax,
-    ThreeDMultirotorTransformed,
     PlanarMultirotorTransformed,
     jitted_linearize_system,
     quad_sys_planar,
     ulim_planar,
     Q_planar,
     R_planar,
-    quad_sys_3D,
-    ulim_3D,
-    Q_3D,
-    R_3D,
     Q_ref_planar,
     R_ref_planar,
 
@@ -34,7 +28,6 @@ from .mm_rta import(
 __all__ = [
     'GPR',
     'TVGPR',
-    'rollout',
     'jitted_rollout',
     'u_applied',
     'get_gp_mean',
