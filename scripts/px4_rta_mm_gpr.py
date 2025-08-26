@@ -493,34 +493,6 @@ class OffboardControl(Node):
         self.offboard_control_mode_publisher.publish(msg)
         # self.get_logger().info("Switching to position control mode")
 
-    def publish_offboard_control_heartbeat_signal_actuators(self) -> None:
-        """Publish the offboard control mode heartbeat for actuator-only setpoints."""
-        msg = OffboardControlMode()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.position = False
-        msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
-        msg.thrust_and_torque = False
-        msg.direct_actuator = True
-        self.offboard_control_mode_publisher.publish(msg)
-        # self.get_logger().info("Switching to actuator control mode")
-
-    def publish_offboard_control_heartbeat_signal_thrust_moment(self) -> None:
-        """Publish the offboard control mode heartbeat for actuator-only setpoints."""
-        msg = OffboardControlMode()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.position = False
-        msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
-        msg.thrust_and_torque = True
-        msg.direct_actuator = False
-        self.offboard_control_mode_publisher.publish(msg)
-        # self.get_logger().info("Switching to force and moment control mode")
-
     def publish_offboard_control_heartbeat_signal_body_rate(self) -> None:
         """Publish the offboard control mode heartbeat for body rate setpoints."""
         msg = OffboardControlMode()
@@ -779,39 +751,6 @@ class OffboardControl(Node):
                 print(f"Feedback Gain Matrix:\n{self.feedback_K}")
                 print(f"{A.shape=}, {B.shape=}, {self.feedback_K.shape=}")
                 print(f"{'=' * 60}\n\n")
-
-    def lqr_administrator_planar(self, ref, state, input, output):
-        """
-        self.time_from_start = time.time() - self.T0 # Update time from start of the program
-        print(f"In LQR Administrator: {self.time_from_start=:.2f} and {self.last_lqr_update_time=:.2f}, difference: {self.time_from_start - self.last_lqr_update_time:.2f}")
-        t0 = time.time()  # Start time for LQR computation
-
-        if (self.time_from_start - self.last_lqr_update_time) >= 1.0 or self.first_LQR:  # Re-linearize and re-compute the LQR gain X seconds
-            noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            self.update_lqr_feedback(quad_sys_planar, state, input, noise)
-            print(f"Time taken to update LQR {time.time() - t0}")
-
-        error = ref - state  # Compute the error between the reference and the current state
-        nominal = self.feedback_K @ error  # Compute the nominal control input
-        nominalG = nominal + jnp.array([sim_constants.MASS * sim_constants.GRAVITY, 0.0])  # Add gravity compensation
-        clipped = jnp.clip(nominalG, ulim_planar.lower, ulim_planar.upper)  # Clip the control input to the limits
-
-        PRINT_LQR_DEBUG = True  # Set to True to print debug information for LQR
-        if PRINT_LQR_DEBUG:
-            print(f"\n\n{'=' * 60}")
-            print(f"Current State:\n{state=}")
-            print(f"Reference:\n{ref=}")
-            print(f"Error:\n{error=}")  
-            print(f"Nominal Control Input: {nominal}")
-            print(f"Input with Gravity Compensation: {nominalG}")
-            print(f"{ulim_planar.lower=}, {ulim_planar.upper=}")
-            print(f"Clipped Control Input: {clipped}")
-            print(f"{'=' * 60}\n\n")
-
-        print(f"Time taken for LQR computation: {time.time() - t0:.4f} seconds")
-        return clipped
-        """
-        pass
 
     def rta_mm_gpr_administrator(self, ref, state, input, output):
         """Run the RTA-MM administrator to compute the control inputs."""
