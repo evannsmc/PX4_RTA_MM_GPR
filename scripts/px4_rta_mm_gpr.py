@@ -24,6 +24,7 @@ import numpy as np
 from functools import partial
 from scipy.spatial.transform import Rotation as R
 
+from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.utilities import test_function
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
 from px4_rta_mm_gpr.utilities import sim_constants # Import simulation constants
@@ -471,143 +472,6 @@ class OffboardControl(Node):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
 
-    def arm(self) -> None:
-        """Send an arm command to the vehicle."""
-        self.publish_vehicle_command(
-            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
-        self.get_logger().info('Arm command sent')
-
-    def disarm(self) -> None:
-        """Send a disarm command to the vehicle."""
-        self.publish_vehicle_command(
-            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
-        self.get_logger().info('Disarm command sent')
-
-    def engage_offboard_mode(self) -> None:
-        """Switch to offboard mode."""
-        self.publish_vehicle_command(
-            VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-        self.get_logger().info("Switching to offboard mode")
-
-    def land(self) -> None:
-        """Switch to land mode."""
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        self.get_logger().info("Switching to land mode")
-
-    def publish_offboard_control_heartbeat_signal_position(self) -> None:
-        """Publish the offboard control mode heartbeat for position-only setpoints."""
-        msg = OffboardControlMode()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.position = True
-        msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
-        msg.thrust_and_torque = False
-        msg.direct_actuator = False
-        self.offboard_control_mode_publisher.publish(msg)
-        # self.get_logger().info("Switching to position control mode")
-
-    def publish_offboard_control_heartbeat_signal_body_rate(self) -> None:
-        """Publish the offboard control mode heartbeat for body rate setpoints."""
-        msg = OffboardControlMode()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.position = False
-        msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = True
-        msg.thrust_and_torque = False
-        msg.direct_actuator = False
-        self.offboard_control_mode_publisher.publish(msg)
-        # self.get_logger().info("Switching to body rate control mode")
-    
-    def publish_position_setpoint(self, x: float = 0.0, y: float = 0.0, z: float = -3.0, yaw: float = 0.0) -> None:
-        """Publish the trajectory setpoint.
-
-        Args:
-            x (float, optional): Desired x position in meters. Defaults to 0.0.
-            y (float, optional): Desired y position in meters_. Defaults to 0.0.
-            z (float, optional): Desired z position in meters. Defaults to -3.0.
-            yaw (float, optional): Desired yaw position in radians. Defaults to 0.0.
-
-        Returns:
-            None
-
-        Raises:
-            TypeError: If x, y, z, or yaw are not of type float.
-        Raises:
-            ValueError: If x, y, z are not within the expected range.
-        """
-        for name, val in zip(("x","y","z","yaw"), (x,y,z,yaw)):
-            if not isinstance(val, float):
-                raise TypeError(
-                                f"\n{'=' * 60}"
-                                f"\nInvalid input type for {name}\n"
-                                f"Expected float\n"
-                                f"Received {type(val).__name__}\n"
-                                f"{'=' * 60}"
-                                )
-               
-        # if not (-2.0 <= x <= 2.0) or not (-2.0 <= y <= 2.0) or not (-3.0 <= z <= -0.2):
-        #     raise ValueError("x must be between -2.0 and 2.0, y must be between -2.0 and 2.0, z must be between -0.2 and -3.0")
-        
-        msg = TrajectorySetpoint()
-        msg.position = [x, y, z] # position in meters
-        msg.yaw = yaw # yaw in radians
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.trajectory_setpoint_publisher.publish(msg)
-        self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
-
-    def publish_body_rate_setpoint(self, throttle: float = 0.0, p: float = 0.0, q: float = 0.0, r: float = 0.0) -> None:
-        """Publish the body rate setpoint.
-        
-        Args:
-            p (float): Desired roll rate in radians per second.
-            q (float): Desired pitch rate in radians per second.
-            r (float): Desired yaw rate in radians per second.
-            throttle (float): Desired throttle in normalized from [-1,1] in NED body frame
-
-        Returns:
-            None
-        
-        Raises:
-            ValueError: If p, q, r, or throttle are not within expected ranges.
-        """
-
-        
-        # print(f"Publishing body rate setpoint: roll={p}, pitch={q}, yaw={r}, throttle={throttle}")
-        msg = VehicleRatesSetpoint()
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.roll = p
-        msg.pitch = q
-        msg.yaw = r
-        msg.thrust_body[0] = 0.0
-        msg.thrust_body[1] = 0.0
-        msg.thrust_body[2] = -1 * float(throttle)
-        self.vehicle_rates_setpoint_publisher.publish(msg)
-        self.get_logger().info(f"Publishing body rate setpoint: roll={p}, pitch={q}, yaw={r}, thrust_body={throttle}")
-
-        # exit(0)
-
-    def publish_vehicle_command(self, command, **params) -> None:
-        """Publish a vehicle command."""
-        msg = VehicleCommand()
-        msg.command = command
-        msg.param1 = params.get("param1", 0.0)
-        msg.param2 = params.get("param2", 0.0)
-        msg.param3 = params.get("param3", 0.0)
-        msg.param4 = params.get("param4", 0.0)
-        msg.param5 = params.get("param5", 0.0)
-        msg.param6 = params.get("param6", 0.0)
-        msg.param7 = params.get("param7", 0.0)
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.vehicle_command_publisher.publish(msg)
 
     def offboard_heartbeat_signal_callback(self) -> None:
         """Callback function for the heartbeat signals that maintains flight controller in offboard mode and switches between offboard flight modes."""
@@ -620,20 +484,23 @@ class OffboardControl(Node):
             return
 
         if self.time_from_start <= self.begin_actuator_control:
-            self.publish_offboard_control_heartbeat_signal_position()
+            publish_offboard_control_heartbeat_signal_position(self)
         elif self.time_from_start <= self.land_time:  
-            self.publish_offboard_control_heartbeat_signal_body_rate()
+            publish_offboard_control_heartbeat_signal_body_rate(self)
         elif self.time_from_start > self.land_time:
-            self.publish_offboard_control_heartbeat_signal_position()
+            publish_offboard_control_heartbeat_signal_position(self)
         else:
             raise ValueError("Unexpected time_from_start value")
 
         if self.offboard_heartbeat_counter <= 10:
             if self.offboard_heartbeat_counter == 10:
-                self.engage_offboard_mode()
-                self.arm()
+                engage_offboard_mode(self)
+                arm(self)
             self.offboard_heartbeat_counter += 1
- 
+
+
+
+
     def control_algorithm_callback(self) -> None:
         """Callback function to handle control algorithm once in offboard mode."""
         self.time_from_start = time.time() - self.T0
@@ -645,7 +512,7 @@ class OffboardControl(Node):
             return
 
         if self.time_from_start <= self.begin_actuator_control:
-            self.publish_position_setpoint(0., 4.0, self.max_height, 0.0)
+            publish_position_setpoint(self, 0., 4.0, self.max_height, 0.0)
 
         elif self.time_from_start <= self.land_time:
             # f, M = self.control_administrator()
@@ -654,10 +521,11 @@ class OffboardControl(Node):
 
         elif self.time_from_start > self.land_time or (abs(self.z) <= 1.5 and self.time_from_start > 20):
             print("Landing...")
-            self.publish_position_setpoint(0.0, 0.0, -0.83, 0.0)
+            publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
             if abs(self.x) < 0.2 and abs(self.y) < 0.2 and abs(self.z) <= 0.85:
                 print("Vehicle is close to the ground, preparing to land.")
-                self.land()                    
+                land(self)
+                disarm(self)
                 exit(0)
 
         else:
@@ -727,7 +595,7 @@ class OffboardControl(Node):
         new_roll_rate = float(new_u[1])  # Convert jax.numpy array to float
         new_pitch_rate = float(new_u[2])  # Convert jax.numpy array to float
         new_yaw_rate = float(new_u[3])    # Convert jax.numpy array to float
-        self.publish_body_rate_setpoint(new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate)
+        publish_body_rate_setpoint(self, new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate)
         # exit(0)
 
         # Log the states, inputs, and reference trajectories for data analysis
