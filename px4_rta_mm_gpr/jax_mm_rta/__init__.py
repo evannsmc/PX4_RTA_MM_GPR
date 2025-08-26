@@ -16,13 +16,6 @@ from .mm_rta import(
     collection_id_jax,
     PlanarMultirotorTransformed,
     jitted_linearize_system,
-    quad_sys_planar,
-    ulim_planar,
-    Q_planar,
-    R_planar,
-    Q_ref_planar,
-    R_ref_planar,
-
 )
 
 __all__ = [
@@ -34,12 +27,5 @@ __all__ = [
     'collection_id_jax',
     'PlanarMultirotorTransformed',
     'jitted_linearize_system',
-    'quad_sys_planar',
-    'ulim_planar',
-    'Q_planar',
-    'R_planar',
-    'Q_ref_planar',
-    'R_ref_planar',
-
 ]
 

@@ -1,13 +1,37 @@
 import jax
-import jax.numpy as jnp
-import immrax as irx
 from functools import partial
+import jax.numpy as jnp
+
+import immrax as irx
 from .TVGPR import TVGPR # Import the TVGPR class for Gaussian Process Regression
-import control
 from px4_rta_mm_gpr.utilities.jax_setup import jit
 
 
 GRAVITY: float = 9.806
+
+## Planar Case
+class PlanarMultirotorTransformed(irx.System) :
+    def __init__ (self, mass):
+        self.xlen = 5
+        self.evolution = 'continuous'
+        self.G = GRAVITY # gravitational acceleration in m/s^2
+        self.M = mass # mass of the multirotor in kg
+
+    def f(self, t, x, u, w): #jax version of Eq.30 in "Trajectory Tracking Runtime Assurance for Systems with Partially Unknown Dynamics"
+        py, pz, h, v, theta = x
+        u1, u2 = u
+        wz = w # horizontal wind disturbance as a function of height
+        G = self.G
+        M = self.M
+
+        return jnp.hstack([
+            h*jnp.cos(theta) - v*jnp.sin(theta), #py_dot = hcos(theta) - vsin(theta)
+            h*jnp.sin(theta) + v*jnp.cos(theta), #pz_dot = hsin(theta) + vcos(theta)
+            (wz/M) * jnp.cos(theta) + G*jnp.sin(theta), #hdot = (wz/m)*cos(theta) + G*sin(theta)
+            -(u1/M) * jnp.cos(theta) + G*jnp.cos(theta) - (wz/M) * jnp.sin(theta), #vdot = -(u1/m)*cos(theta) + G*cos(theta) - (wz/m)*sin(theta)
+            u2
+        ])
+    
 
 ## Get mean of GP at a time based on height
 def get_gp_mean(GP, t, x) :
@@ -115,30 +139,6 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
     return jnp.vstack((irx.i2ut(ix), xx[0])), jnp.vstack((xc, xx[1])), jnp.vstack(xx[2]) #TODO: change variable names to be more descriptive
 
 
-## Planar Case
-class PlanarMultirotorTransformed(irx.System) :
-    def __init__ (self, mass):
-        self.xlen = 5
-        self.evolution = 'continuous'
-        self.G = GRAVITY # gravitational acceleration in m/s^2
-        self.M = mass # mass of the multirotor in kg
-
-    def f(self, t, x, u, w): #jax version of Eq.30 in "Trajectory Tracking Runtime Assurance for Systems with Partially Unknown Dynamics"
-        py, pz, h, v, theta = x
-        u1, u2 = u
-        wz = w # horizontal wind disturbance as a function of height
-        G = self.G
-        M = self.M
-
-        return jnp.hstack([
-            h*jnp.cos(theta) - v*jnp.sin(theta), #py_dot = hcos(theta) - vsin(theta)
-            h*jnp.sin(theta) + v*jnp.cos(theta), #pz_dot = hsin(theta) + vcos(theta)
-            (wz/M) * jnp.cos(theta) + G*jnp.sin(theta), #hdot = (wz/m)*cos(theta) + G*sin(theta)
-            -(u1/M) * jnp.cos(theta) + G*jnp.cos(theta) - (wz/M) * jnp.sin(theta), #vdot = -(u1/m)*cos(theta) + G*cos(theta) - (wz/m)*sin(theta)
-            u2
-        ])
-    
-
 ## JAX Linearization Function
 @partial(jit, static_argnums=0)
 def jitted_linearize_system(sys, x0, u0, w0):
@@ -192,6 +192,7 @@ def jitted_linearize_system(sys, x0, u0, w0):
 
 
 if __name__ == "__main__":
+    import control
 
     GP_instantiation_values = jnp.array([[-2, 0.0], #make the second column all zeros
                                         [0, 0.0],
