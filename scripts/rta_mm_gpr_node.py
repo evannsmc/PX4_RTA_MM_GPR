@@ -10,6 +10,7 @@ from px4_msgs.msg import(
     VehicleStatus, RcChannels #Import PX4 ROS2-API messages for receiving vehicle state information
 )
 
+
 import time
 import control
 import math as m
@@ -17,6 +18,7 @@ import numpy as np
 from typing import Optional
 from scipy.spatial.transform import Rotation as R
 
+from px4_rta_mm_gpr.utilities.jax_setup import jit
 from px4_rta_mm_gpr.jax_mm_rta import *
 from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
@@ -28,13 +30,6 @@ import jax.numpy as jnp
 import immrax as irx
 from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
-
-# Some configurations
-jax.config.update("jax_enable_x64", True)
-def jit (*args, **kwargs): # A simple wrapper for JAX's jit function to set the backend device
-    device = 'cpu'
-    kwargs.setdefault('backend', device)
-    return jax.jit(*args, **kwargs)
 
 GP_instantiation_values = jnp.array([[-2, 0.0], #make the second column all zeros
                                     [0, 0.0],
@@ -214,7 +209,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -375,7 +370,7 @@ class OffboardControl(Node):
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
                     # t0 = time.time()  # Reset time for rollout computation
                     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM
+                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS
                     )
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
