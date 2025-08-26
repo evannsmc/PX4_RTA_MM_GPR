@@ -316,6 +316,8 @@ class OffboardControl(Node):
 
     def vehicle_odometry_subscriber_callback(self, msg) -> None:
         """Callback function for vehicle odometry topic subscriber."""
+        print(f"Received odometry data: {msg=}")
+
         print("==" * 30)
         self.x = msg.position[0]
         self.y = msg.position[1]
@@ -325,15 +327,22 @@ class OffboardControl(Node):
         self.vy = msg.velocity[1]
         self.vz = msg.velocity[2]
 
+        self.ax = msg.acceleration[0]
+        self.ay = msg.acceleration[1]
+        self.az = msg.acceleration[2]
 
-        self.roll, self.pitch, yaw = R.from_quat(msg.q, scalar_first=True).as_euler('xyz', degrees=False)
-        self.yaw = self.adjust_yaw(yaw)  # Adjust yaw to account for full rotations
-        r_final = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
-        self.rotation_object = r_final  # Store the final rotation object for further use
+        self.msg_quatval = msg.quaternion
 
         self.p = msg.angular_velocity[0]
         self.q = msg.angular_velocity[1]
         self.r = msg.angular_velocity[2]
+
+
+        self.roll, self.pitch, yaw = R.from_quat(msg.quaternion, scalar_first=True).as_euler('xyz', degrees=False)
+        self.yaw = self.adjust_yaw(yaw)  # Adjust yaw to account for full rotations
+        r_final = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
+        self.rotation_object = r_final  # Store the final rotation object for further use
+
 
         self.full_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw, self.p, self.q, self.r])
         self.nr_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw])
@@ -372,7 +381,7 @@ class OffboardControl(Node):
 
             # if self.odom_counter > 5:
             #     exit(0)
-        ODOMETRY_DEBUG_PRINT = False
+        ODOMETRY_DEBUG_PRINT = True
         if ODOMETRY_DEBUG_PRINT:
             # print(f"{self.full_state_vector=}")
             print(f"{self.nr_state_vector=}")
@@ -381,6 +390,9 @@ class OffboardControl(Node):
             print(f"{self.roll = }, {self.pitch = }, {self.yaw = }(rads)")
             # print(f"{self.rotation_object.as_euler('xyz', degrees=True) = } (degrees)")
             # print(f"{self.ROT = }")
+        # print("done")
+        # exit(0)
+
 
     def rollout_callback(self):
         """Callback function for the rollout timer."""
