@@ -21,7 +21,7 @@ from px4_rta_mm_gpr.jax_mm_rta import *
 from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
 from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
-from px4_rta_mm_gpr.utilities import sim_constants # Import simulation constants
+
 
 import jax
 import jax.numpy as jnp
@@ -65,22 +65,15 @@ class OffboardControl(Node):
 
         if self.sim:
             print("Using simulator constants and functions")
-            from px4_rta_mm_gpr.utilities import sim_constants # Import simulation constants
-            self.MASS = sim_constants.MASS
-            self.THRUST_CONSTANT = sim_constants.THRUST_CONSTANT #x500 gazebo simulation motor thrust constant
-            self.MOTOR_VELOCITY_ARMED = sim_constants.MOTOR_VELOCITY_ARMED #x500 gazebo motor velocity when armed
-            self.MAX_ROTOR_SPEED = sim_constants.MAX_ROTOR_SPEED #x500 gazebo simulation max rotor speed
-            self.MOTOR_INPUT_SCALING = sim_constants.MOTOR_INPUT_SCALING #x500 gazebo simulation motor input scaling
-            # exit(0)
-
-        elif not self.sim:
+            from px4_rta_mm_gpr.utilities import sim_utilities # Import simulation constants
+            self.MASS = sim_utilities.MASS
+            self.get_throttle_command_from_force = sim_utilities.get_throttle_command_from_force
+        else:
             print("Using hardware constants and functions")
-            #TODO: do the hardware version of the above here
-            try:
-                from px4_rta_mm_gpr.utilities import hardware_constants
-                self.MASS = hardware_constants.MASS
-            except ImportError:
-                raise ImportError("Hardware not implemented yet.")
+            from px4_rta_mm_gpr.utilities import hardware_utilities # Import hardware constants
+            self.MASS = hardware_utilities.MASS
+            self.get_throttle_command_from_force = hardware_utilities.get_throttle_command_from_force
+
 
 
         # Logging related variables
@@ -596,32 +589,6 @@ class OffboardControl(Node):
         print(f"Time taken for RTA-MM GPR computation: {time.time() - t0:.4f} seconds")
         return applied_input
 
-    def get_throttle_command_from_force(self, collective_thrust) -> float: #Converts force to throttle command
-        """ Convert the positive collective thrust force to a positive throttle command. """
-        print(f"Conv2Throttle: collective_thrust: {collective_thrust}")
-        if self.sim:
-            try:
-                motor_speed = m.sqrt(collective_thrust / (4.0 * self.THRUST_CONSTANT))
-                throttle_command = (motor_speed - self.MOTOR_VELOCITY_ARMED) / self.MOTOR_INPUT_SCALING
-                return throttle_command
-            except Exception as e:
-                print(f"Error in throttle conversion: {e}")
-                raise  # Raise the exception to ensure the error is handled properly
-
-        if not self.sim: # I got these parameters from a curve fit of the throttle command vs collective thrust from the hardware spec sheet
-            try:
-                a = 0.00705385408507030
-                b = 0.0807474474438391
-                c = 0.0252575818743285
-                throttle_command = a*collective_thrust + b*m.sqrt(collective_thrust) + c  # equation form is a*x + b*sqrt(x) + c = y
-                return throttle_command
-        
-            except Exception as e:
-                print(f"Error in throttle conversion (non-sim mode): {e}")
-                raise  # Raise the exception to ensure the error is handled properly
-        else:
-            raise ValueError("self.sim must be True or False, not None")  # Ensure sim is set to True or False before calling this function
-    
 # ~~ The following functions handle the log update and data retrieval for analysis ~~
     def update_logged_data(self, data):
         print("Updating Logged Data")
