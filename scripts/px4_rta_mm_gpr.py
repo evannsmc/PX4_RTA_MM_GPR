@@ -8,8 +8,7 @@ from rclpy.qos import (QoSProfile,
                        HistoryPolicy,
                        DurabilityPolicy) # Import ROS2 QoS policy modules
 
-from mocap_msgs.msg import FullState
-
+from mocap4r2_msgs.msg import FullState
 from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
