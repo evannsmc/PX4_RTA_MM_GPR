@@ -5,7 +5,7 @@ import traceback
 
 import rclpy # Import ROS2 Python client library
 from .rta_mm_gpr_node import OffboardControl
-from ROS2Logger.Logger.Logger import Logger
+from Logger import Logger
 
 BANNER = "=" * 65
 

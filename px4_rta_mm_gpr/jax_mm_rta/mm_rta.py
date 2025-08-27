@@ -65,7 +65,7 @@ def collection_id_jax(xref, xemb, threshold=0.3):
 
 ## JIT: Rollout function
 @partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys):
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -0.6, 0., 0., 0.])):
     def mean_disturbance (t, x) :
             return GP.mean(jnp.hstack((t, x[1]))).reshape(-1)    
 
@@ -80,7 +80,8 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         
     def step (carry, t) :
         xt_emb, xt_ref, MS = carry
-        xt_des = jnp.array([0., -1.7, 0., 0., 0.]) # desired final state
+        #(py,pz,h,v,theta)
+        xt_des = x_des # jnp.array([0., -1.7, 0., 0., 0.]) # desired final state
         error = xt_ref - xt_des  # Compute the error between the current rollout reference state and the desired state
         nominal = -K_reference @ error  # Compute the nominal input based on the reference state and feedback gain
         uG = nominal + jnp.array([MASS * GRAVITY, 0.0])  # Add the gravitational force to the nominal input

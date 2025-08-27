@@ -205,7 +205,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -237,6 +237,7 @@ class OffboardControl(Node):
         init_ref = jnp.array([0.0, 0.0, -3.0, 0.0])  # Initial reference vector for testing
 
         # Initialize rta_mm_gpr variables
+        self.GOAL_STATE = jnp.array([0., -0.5, 0., 0., 0.])
         n_obs = 9
         x0 = jnp.array(init_state[0:5])  # Initial state vector for testing
         self.obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(actual_disturbance_GP, 0.0, x0)[0]]]),(n_obs,1))
@@ -250,15 +251,15 @@ class OffboardControl(Node):
         # Initialize rollout parameters
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
         self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
-        self.Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
+        self.Q_planar = jnp.array([10, 5, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
         self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
 
 
         #(py,pz,h,v,theta)
-        self.Q_ref_planar = jnp.array([500, 50, 500, 50, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        # self.Q_ref_planar = jnp.array([50, 50, 200, 200, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
 
-        # self.Q_ref_planar =jnp.array([50, 20, 50, 20, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
-        self.R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
+        self.Q_ref_planar =jnp.array([50, 20, 50, 20, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
 
@@ -382,7 +383,7 @@ class OffboardControl(Node):
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
                     # t0 = time.time()  # Reset time for rollout computation
                     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar
+                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE
                     )
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
@@ -458,7 +459,7 @@ class OffboardControl(Node):
             publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
         elif t < self.land_time:
             self.control_administrator()
-        elif t > self.land_time or (abs(self.z) <= 1.5 and t > 20):
+        elif t > self.land_time or (abs(self.z) <= 1.0 and t > 20):
             print("Landing...")
             publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
             if abs(self.x) < 0.2 and abs(self.y) < 0.2 and abs(self.z) <= 0.85:
@@ -578,6 +579,7 @@ class OffboardControl(Node):
         # Re-compute LQR input
         applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K, self.ulim_planar)
         self.traj_idx += 1 #update trajectory index
+        print(f"Ultimate ref (y,z): {self.rollout_ref[-1,:2]}")
         print(f"{self.traj_idx=}")
         
         self.y_ref = self.rollout_ref[self.traj_idx, 0]
