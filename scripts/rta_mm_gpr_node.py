@@ -80,7 +80,7 @@ class OffboardControl(Node):
         self.roll_rate_log = LogType("roll_rate", 11)
         self.pitch_rate_log = LogType("pitch_rate", 12)
         self.yaw_rate_log = LogType("yaw_rate", 13)
-        self.save_tube_log = VectorLogType("save_tube", 14, ['pyL', 'pzL', 'hL', 'vL', 'thetaL', 'pyH', 'pzH', 'hH', 'vH', 'thetaH'])
+        self.save_tube_log = VectorLogType("save_tube", 14, ['pyL', 'pzL', 'pyH', 'pzH'])
 
 
         self.metadata = np.array(['Sim' if self.sim else 'Hardware',
@@ -400,7 +400,8 @@ class OffboardControl(Node):
                     print(f"{self.collection_time=}\n{safety_horizon=}")
 
                     self.traj_idx = 0
-                    self.save_tube = self.reachable_tube[::100]
+                    self.save_tube = self.reachable_tube[:50:10, [1, 2, 6, 7]]
+
 
                 else:
                     print("You're safe!")
@@ -534,10 +535,8 @@ class OffboardControl(Node):
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                                     ]
         self.update_logged_data(state_input_ref_log_info)
-        # for reach_set in self.save_tube:
-        #     # print(f"{reach_set}")
-        #     self.update_tube_data(reach_set)
-        #     exit(0)
+        for reach_set in self.save_tube:
+            self.update_tube_data(reach_set)
         print("==" * 30)
 
     def update_lqr_feedback(self, sys, state, input, noise):
