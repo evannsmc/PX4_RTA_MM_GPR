@@ -80,7 +80,8 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         
     def step (carry, t) :
         xt_emb, xt_ref, MS = carry
-        error = xt_ref - jnp.array([0., -0.7, 0., 0., 0.])  # Compute the error between the reference and the current state
+        xt_des = jnp.array([0., -1.7, 0., 0., 0.]) # desired final state
+        error = xt_ref - xt_des  # Compute the error between the current rollout reference state and the desired state
         nominal = -K_reference @ error  # Compute the nominal input based on the reference state and feedback gain
         uG = nominal + jnp.array([MASS * GRAVITY, 0.0])  # Add the gravitational force to the nominal input
         u_ref_clipped = jnp.clip(uG, ulim.lower, ulim.upper)  # Clip the reference input to the input saturation limits

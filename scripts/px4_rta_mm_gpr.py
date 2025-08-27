@@ -5,9 +5,9 @@ import traceback
 
 import rclpy # Import ROS2 Python client library
 from .rta_mm_gpr_node import OffboardControl
+from ROS2Logger.Logger.Logger import Logger
 
 BANNER = "=" * 65
-print(f"{BANNER}\nInitializing ROS 2 node\n{BANNER}")
 
 # ~~ Entry point of the code -> Initializes the node and spins it. Also handles exceptions and logging ~~
 def main():
@@ -21,27 +21,41 @@ def main():
     print(f"Arguments: {args}, Unknown: {unknown}")
     sim = args.sim  # already a bool
     filename = args.log_file
-
-    print(f"{sim=}, {filename=}")
+    base_path = os.path.dirname(os.path.abspath(__file__))  # Get the script's directory
+    print(f"{sim=}, {filename=}, {base_path=}")
     print(f"{'SIMULATION' if sim else 'HARDWARE'}")
+
 
     rclpy.init()
     offboard_control = OffboardControl(sim)
+    logger = None
 
-    # base_path = os.path.dirname(os.path.abspath(__file__))  # Get the script's directory
-    # log = Logger(filename, base_path)
 
-    # install_shutdown_logging(log, offboard_control)#, also_shutdown=rclpy.shutdown)# Ensure logs are flushed on Ctrl+C / SIGTERM / normal exit
-    try:
-        rclpy.spin(offboard_control)
-    except KeyboardInterrupt:
-        print(
-              f"{BANNER}\nKeyboard interrupt detected (Ctrl+C), exiting...{BANNER}")
-    except Exception as e:
-        traceback.print_exc()
-    finally:
+    def shutdown_logging(*args):
+        print("\nInterrupt/Error/Termination Detected, Triggering Logging Process and Shutting Down Node...")
+        if logger:
+            logger.log(offboard_control)
         offboard_control.destroy_node()
         rclpy.shutdown()
 
+
+    try:
+        print(f"{BANNER}\nInitializing ROS 2 node\n{BANNER}")
+        logger = Logger(filename, base_path)
+        rclpy.spin(offboard_control)
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt detected (Ctrl+C), exiting...")
+    except Exception as e:
+        print(f"\nError in main: {e}")
+        traceback.print_exc()
+    finally:
+        shutdown_logging()
+        print("\nNode has shut down.")
+
+
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\nError in __main__: {e}")
+        traceback.print_exc()

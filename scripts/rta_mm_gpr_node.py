@@ -252,8 +252,15 @@ class OffboardControl(Node):
         self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
         self.Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
         self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
-        self.Q_ref_planar =jnp.array([20, 50, 500, 500, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+
+
+        #(py,pz,h,v,theta)
+        self.Q_ref_planar = jnp.array([500, 50, 500, 50, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+
+        # self.Q_ref_planar =jnp.array([50, 20, 50, 20, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
         self.R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
+
+
 
 
 
