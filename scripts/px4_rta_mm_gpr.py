@@ -1,11 +1,12 @@
 import os
 import sys
+import inspect
 import argparse
 import traceback
 
 import rclpy # Import ROS2 Python client library
 from .rta_mm_gpr_node import OffboardControl
-from Logger import Logger
+from Logger import Logger # type: ignore
 
 BANNER = "=" * 65
 
@@ -33,18 +34,25 @@ def main():
 
     def shutdown_logging(*args):
         print("\nInterrupt/Error/Termination Detected, Triggering Logging Process and Shutting Down Node...")
-        if logger:
-            logger.log(offboard_control)
+
         try:
+            if logger:
+                logger.log(offboard_control)
             offboard_control.destroy_node()
-        except Exception:
-            pass
+        except Exception as e:
+            frame = inspect.currentframe()
+            func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+            print(f"\nError in {__name__}:{func_name}: {e}")
+            traceback.print_exc()
+
+
         # Guard shutdown so it's called at most once
         try:
             if rclpy.ok():
                 rclpy.shutdown()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"\nError in {__name__}: {e}")
+            traceback.print_exc()
 
 
     try:
@@ -54,8 +62,10 @@ def main():
     except KeyboardInterrupt:
         print("\nKeyboard interrupt detected (Ctrl+C), exiting...")
     except Exception as e:
-        print(f"\nError in main: {e}")
-        traceback.print_exc()
+            frame = inspect.currentframe()
+            func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+            print(f"\nError in {__name__}:{func_name}: {e}")
+            traceback.print_exc()
     finally:
         shutdown_logging()
         print("\nNode has shut down.")
@@ -65,5 +75,7 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        print(f"\nError in __main__: {e}")
-        traceback.print_exc()
+            frame = inspect.currentframe()
+            func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+            print(f"\nError in {__name__}:{func_name}: {e}")
+            traceback.print_exc()

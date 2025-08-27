@@ -14,36 +14,22 @@ from px4_msgs.msg import(
 import time
 import control
 import numpy as np
+import inspect
+import traceback
 from typing import Optional
 from scipy.spatial.transform import Rotation as R
 
 from px4_rta_mm_gpr.utilities.jax_setup import jit
 from px4_rta_mm_gpr.jax_mm_rta import *
 from px4_rta_mm_gpr.px4_functions import *
-from px4_rta_mm_gpr.jax_nr import NR_tracker_original#, dynamics, predict_output, get_jac_pred_u, fake_tracker, NR_tracker_flat, NR_tracker_linpred
+from px4_rta_mm_gpr.jax_nr import NR_tracker_original, dynamics
+# from px4_rta_mm_gpr.jax_nr import C as OBS_MATRIX
 from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
 
 import immrax as irx
 import jax.numpy as jnp
 from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
-
-GP_instantiation_values = jnp.array([[-2, 0.0], #make the second column all zeros
-                                    [0, 0.0],
-                                    [2, 0.0],
-                                    [4, 0.0],
-                                    [6, 0.0],
-                                    [8, 0.0],
-                                    [10, 0.0],
-                                    [12, 0.0]]) # at heights of y in the first column, disturbance to the values in the second column
-# add a time dimension at t=0 to the GP instantiation values for TVGPR instantiation
-actual_disturbance_GP = TVGPR(jnp.hstack((jnp.zeros((GP_instantiation_values.shape[0], 1)), GP_instantiation_values)), 
-                                       sigma_f = 5.0, 
-                                       l=2.0, 
-                                       sigma_n = 0.01,
-                                       epsilon=0.1,
-                                       discrete=False
-                                       )
 
 class OffboardControl(Node):
     def __init__(self, sim: bool) -> None:
@@ -133,6 +119,11 @@ class OffboardControl(Node):
         self.control_period: float = 0.01 # (s) We want 1000Hz for direct control algorithm
         self.traj_idx = 0 # Index for trajectory setpoint
 
+        self.OBS_DYN = jnp.array([
+                                [0, 0, 0, 1, 0, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 1, 0, 0, 0, 0],
+                                [0, 0, 0, 0, 0, 1, 0, 0, 0]])
+
         # Timers for my callback functions
         self.offboard_timer = self.create_timer(self.heartbeat_period,
                                                 self.offboard_heartbeat_signal_callback) #Offboard 'heartbeat' signal should be sent at 10Hz
@@ -140,6 +131,8 @@ class OffboardControl(Node):
                                                self.control_algorithm_callback) #My control algorithm needs to execute at >= 100Hz
         self.rollout_timer = self.create_timer(self.control_period,
                                                self.rollout_callback) #My rollout function needs to execute at >= 100Hz
+        self.wind_estimator = self.create_timer(self.heartbeat_period,
+                                                self.wind_estimator_callback)
 
         self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
 
@@ -237,10 +230,29 @@ class OffboardControl(Node):
         init_ref = jnp.array([0.0, 0.0, -3.0, 0.0])  # Initial reference vector for testing
 
         # Initialize rta_mm_gpr variables
-        self.GOAL_STATE = jnp.array([0., -0.5, 0., 0., 0.])
+        self.GOAL_STATE = jnp.array([0., -0.6, 0., 0., 0.])
         n_obs = 9
         x0 = jnp.array(init_state[0:5])  # Initial state vector for testing
-        self.obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(actual_disturbance_GP, 0.0, x0)[0]]]),(n_obs,1))
+
+        initialization_values_GP = jnp.array([[-2, 0.0], #make the second column all zeros
+                                        [0, 0.0],
+                                        [2, 0.0],
+                                        [4, 0.0],
+                                        [6, 0.0],
+                                        [8, 0.0],
+                                        [10, 0.0],
+                                        [12, 0.0]]) # at heights of y in the first column, disturbance to the values in the second column
+        # add a time dimension at t=0 to the GP instantiation values for TVGPR instantiation
+        initialization_GP = TVGPR(jnp.hstack((jnp.zeros((initialization_values_GP.shape[0], 1)), initialization_values_GP)), 
+                                            sigma_f = 5.0, 
+                                            l=2.0, 
+                                            sigma_n = 0.01,
+                                            epsilon=0.1,
+                                            discrete=False
+                                            )
+        self.obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(n_obs,1))
+
+
         self.x_pert = 1e-4 * jnp.array([1., 1., 1., 1., 1.])
         ix0 = irx.icentpert(x0, self.x_pert)
         u0 = jnp.array(init_input[0:2])  # Initial input vector for testing
@@ -249,6 +261,8 @@ class OffboardControl(Node):
 
 
         # Initialize rollout parameters
+        self.wnd_cnt = 0
+        self.wind_obs = NpToJaxDrainRing()
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
         self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
         self.Q_planar = jnp.array([10, 5, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
@@ -319,10 +333,6 @@ class OffboardControl(Node):
         self.q = msg.angular_velocity[1]
         self.r = msg.angular_velocity[2]
 
-
-
-
-
         self.full_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.ax, self.ay, self.az, self.roll, self.pitch, self.yaw, self.p, self.q, self.r])
         self.nr_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw])
         self.flat_state_vector = np.array([self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.vz, 0., 0., 0., 0., 0.])
@@ -364,7 +374,40 @@ class OffboardControl(Node):
             print(f"{self.output_vector=}")
             print(f"{self.roll = }, {self.pitch = }, {self.yaw = }(rads)")
 
-        # exit(0)
+
+    def wind_estimator_callback(self):
+        """Callback function for the wind estimation callback"""
+        print(f"In wind callback")
+        if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
+            try:
+                _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
+                print(f"{ay_hat = }, {az_hat = }")
+                print(f"{self.ay}, {self.az}")
+
+                ay_wind = (self.ay - ay_hat)
+                gz_windforce = self.MASS * ay_wind
+
+                wind_data = np.array([time.time() - self.T0, self.z, gz_windforce])
+                print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
+                self.wind_obs.add(wind_data)
+                print(f"{len(self.wind_obs)=}")
+
+
+
+            except AttributeError as e: # for if we 
+                frame = inspect.currentframe()
+                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+                print(f"\nError in {__name__}:{func_name}: {e}")
+                traceback.print_exc()                
+                return
+            except Exception as e:
+                print(f"Exception!")
+                frame = inspect.currentframe()
+                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+                print(f"\nError in {__name__}:{func_name}: {e}")
+                traceback.print_exc()
+                raise  # Re-raise  
+
 
     def rollout_callback(self):
         """Callback function for the rollout timer."""
@@ -412,7 +455,11 @@ class OffboardControl(Node):
             #     print("Ignoring missing attribute:", e)
             #     return
             except Exception as e:
-                raise  # Re-raise all other types of exceptions            
+                frame = inspect.currentframe()
+                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+                print(f"\nError in {__name__}:{func_name}: {e}")
+                traceback.print_exc()
+                raise  # Re-raise  
         else:
             pass
 
@@ -460,10 +507,10 @@ class OffboardControl(Node):
             publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
         elif t < self.land_time:
             self.control_administrator()
-        elif t > self.land_time or (abs(self.z) <= 1.0 and t > 20):
+        elif t > self.land_time or (abs(self.z) <= 1.0 and t > 15):
             print("Landing...")
             publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
-            if abs(self.x) < 0.25 and abs(self.y) < 0.25 and abs(self.z) <= 0.85:
+            if abs(self.x) < 0.25 and abs(self.y) < 0.25 and abs(self.z) <= 0.90:
                 print("Vehicle is close to the ground, preparing to land.")
                 land(self)
                 disarm(self)

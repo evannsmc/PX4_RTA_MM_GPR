@@ -16,6 +16,7 @@ from .mm_rta import(
     collection_id_jax,
     PlanarMultirotorTransformed,
     jitted_linearize_system,
+    NpToJaxDrainRing
 )
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     'collection_id_jax',
     'PlanarMultirotorTransformed',
     'jitted_linearize_system',
+    'NpToJaxDrainRing'
 ]
 

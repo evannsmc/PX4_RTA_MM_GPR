@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
+
 class TVGPR():
     def __init__(self, obs : jax.Array, obs_dim : int = 0, sigma_f : float = 3.0, l : float = 1.0, sigma_n : float = 0.0001, epsilon : float = 0.1, discrete : bool = False) -> None:
 

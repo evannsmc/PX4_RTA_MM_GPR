@@ -1,4 +1,5 @@
 import jax
+import numpy as np
 from functools import partial
 import jax.numpy as jnp
 
@@ -8,6 +9,67 @@ from px4_rta_mm_gpr.utilities.jax_setup import jit
 
 
 GRAVITY: float = 9.806
+
+class NpToJaxDrainRing:
+    """
+    Collect rows in a fast mutable NumPy ring buffer.
+    On drain(), return a jnp.array (oldest→newest) and reset to empty.
+    """
+    def __init__(self, capacity=50, cols=3, dtype=np.float64):
+        self.capacity = capacity
+        self.cols = cols
+        self._data = np.zeros((capacity, cols), dtype=dtype)
+        self._start = 0      # index of oldest row
+        self._size = 0       # number of valid rows
+
+    def add(self, row):
+        """Append one row; overwrite oldest if full."""
+        r = np.asarray(row)
+        if r.shape != (self.cols,):
+            raise ValueError(f"expected shape ({self.cols},), got {r.shape}")
+        end = (self._start + self._size) % self.capacity
+        self._data[end] = r
+        if self._size < self.capacity:
+            self._size += 1
+        else:
+            self._start = (self._start + 1) % self.capacity
+
+    def extend(self, rows):
+        for r in rows:
+            self.add(r)
+
+    def _chron_view(self):
+        if self._size == 0:
+            return self._data[0:0]
+        s = self._start
+        e = (self._start + self._size) % self.capacity
+        if s < e:
+            return self._data[s:e]
+        return np.vstack((self._data[s:], self._data[:e]))
+
+    def drain(self):
+        """
+        Return all rows as a jnp.array (oldest→newest) and reset buffer.
+        Note: this converts/copies to device as needed.
+        """
+        out_np = self._chron_view().copy()
+        # reset
+        self._start = 0
+        self._size = 0
+        # optional: zero out data to avoid holding old values
+        # self._data[:] = 0
+        return jnp.array(out_np)
+    
+    def __call__(self):
+        self.drain()
+
+    # Subscriptable / iterable (chronological)
+    def __len__(self): return self._size
+    def __getitem__(self, idx): return self._chron_view()[idx]
+    def __iter__(self): return iter(self._chron_view())
+    def __repr__(self):
+        return f"NpToJaxDrainRing(size={self._size}, cap={self.capacity}, data=\n{self._chron_view()}\n)"
+
 
 ## Planar Case
 class PlanarMultirotorTransformed(irx.System) :
