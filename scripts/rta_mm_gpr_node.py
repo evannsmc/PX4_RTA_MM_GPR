@@ -462,7 +462,7 @@ class OffboardControl(Node):
         elif t > self.land_time or (abs(self.z) <= 1.0 and t > 20):
             print("Landing...")
             publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
-            if abs(self.x) < 0.2 and abs(self.y) < 0.2 and abs(self.z) <= 0.85:
+            if abs(self.x) < 0.25 and abs(self.y) < 0.25 and abs(self.z) <= 0.85:
                 print("Vehicle is close to the ground, preparing to land.")
                 land(self)
                 disarm(self)
@@ -533,7 +533,7 @@ class OffboardControl(Node):
                                     0., self.y_ref, self.z_ref, self.yaw_ref,
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                                     ]
-        # self.update_logged_data(state_input_ref_log_info)
+        self.update_logged_data(state_input_ref_log_info)
         # for reach_set in self.save_tube:
         #     # print(f"{reach_set}")
         #     self.update_tube_data(reach_set)

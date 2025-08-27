@@ -35,8 +35,16 @@ def main():
         print("\nInterrupt/Error/Termination Detected, Triggering Logging Process and Shutting Down Node...")
         if logger:
             logger.log(offboard_control)
-        offboard_control.destroy_node()
-        rclpy.shutdown()
+        try:
+            offboard_control.destroy_node()
+        except Exception:
+            pass
+        # Guard shutdown so it's called at most once
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
     try:
