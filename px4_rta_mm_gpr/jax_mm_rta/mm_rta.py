@@ -223,10 +223,11 @@ if __name__ == "__main__":
     obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(actual_disturbance_GP, 0.0, x0)[0]]]),(n_obs,1))
 
     quad_sys_planar = PlanarMultirotorTransformed(mass=MASS)
-    ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
+    ulim_planar = irx.interval([0, -1],[19, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
     Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
     R_planar = jnp.array([1, 1]) * jnp.eye(2)
-    Q_ref_planar =jnp.array([20, 50, 500, 500, 1]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+    Q_ref_planar =jnp.array([50, 20, 50, 20, 10]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+    #(py,pz,h,v,theta)
     R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
 
     A,B = jitted_linearize_system(quad_sys_planar, x0, u0, w0)
