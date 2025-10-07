@@ -3,11 +3,11 @@ from rclpy.qos import (QoSProfile,
                        ReliabilityPolicy,
                        HistoryPolicy,
                        DurabilityPolicy) # Import ROS2 QoS policy modules
-from mocap4r2_msgs.msg import FullState
 from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
-    VehicleStatus, RcChannels #Import PX4 ROS2-API messages for receiving vehicle state information
+    VehicleStatus, VehicleFullState, #Import PX4 ROS2-API messages for receiving vehicle state information
+    RcChannels
 )
 
 
@@ -30,6 +30,7 @@ import immrax as irx
 import jax.numpy as jnp
 from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
+BANNER = '\n' + "==" * 30 + '\n'
 
 class OffboardControl(Node):
     def __init__(self, sim: bool) -> None:
@@ -92,8 +93,9 @@ class OffboardControl(Node):
             VehicleRatesSetpoint, '/fmu/in/vehicle_rates_setpoint', qos_profile)
 
         # Create subscribers
+        # Create subscribers
         self.vehicle_odometry_subscriber = self.create_subscription(
-            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile)
+            VehicleFullState, '/fmu/out/vehicle_full_state', self.vehicle_odometry_subscriber_callback, qos_profile)
         self.vehicle_status_subscriber = self.create_subscription(
             VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_subscriber_callback, qos_profile)
             
@@ -161,6 +163,7 @@ class OffboardControl(Node):
 
         Otherwise, you'll deploy code that hasn't yet been compiled, which can lead to runtime errors or suboptimal performance.
         """
+        print(f"{BANNER}Initializing JIT compilation for NR tracker and RTA pipeline.")
 
         def time_fns(func):
             def wrapper(*args, **kwargs):
@@ -304,15 +307,14 @@ class OffboardControl(Node):
 
     def rc_channel_subscriber_callback(self, rc_channels):
         """Callback function for RC Channels to create a software 'killswitch' depending on our flight mode channel (position vs offboard vs land mode)"""
-        print('In RC Channel Callback')
+        print(f"{BANNER}In RC Channel Callback")
         flight_mode = rc_channels.channels[self.MODE_CHANNEL-1] # +1 is offboard everything else is not offboard
         self.offboard_mode_rc_switch_on: bool = True if flight_mode >= 0.75 else False
 
     def vehicle_odometry_subscriber_callback(self, msg) -> None:
         """Callback function for vehicle odometry topic subscriber."""
-        print(f"Received odometry data: {msg=}")
+        print(f"{BANNER}Received odometry data: {msg=}")
 
-        print("==" * 30)
         self.x = msg.position[0]
         self.y = msg.position[1]
         self.z = msg.position[2] + (1.0 * self.sim) # Adjust z for simulation, new gazebo model has ground level at around -1.39m 
@@ -324,7 +326,7 @@ class OffboardControl(Node):
         self.ay = msg.acceleration[1]
         self.az = msg.acceleration[2]
 
-        self.roll, self.pitch, yaw = R.from_quat(msg.quaternion, scalar_first=True).as_euler('xyz', degrees=False)
+        self.roll, self.pitch, yaw = R.from_quat(msg.q, scalar_first=True).as_euler('xyz', degrees=False)
         self.yaw = adjust_yaw(self, yaw)  # Adjust yaw to account for full rotations
         self.rotation_object = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
         self.quat = self.rotation_object.as_quat()  # Quaternion representation (xyzw)
@@ -377,7 +379,7 @@ class OffboardControl(Node):
 
     def wind_estimator_callback(self):
         """Callback function for the wind estimation callback"""
-        print(f"In wind callback")
+        print(f"{BANNER}In wind callback")
         if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
             try:
                 _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
@@ -411,7 +413,7 @@ class OffboardControl(Node):
 
     def rollout_callback(self):
         """Callback function for the rollout timer."""
-        print(f"\nIn rollout callback at time: ", time.time() - self.T0)
+        print(f"{BANNER}In rollout callback at time: ", time.time() - self.T0)
         if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
             try:
                 self.time_from_start = time.time() - self.T0
@@ -471,7 +473,7 @@ class OffboardControl(Node):
         """Callback function for the heartbeat signals that maintains flight controller in offboard mode and switches between offboard flight modes."""
         self.time_from_start = time.time() - self.T0
         t = self.time_from_start
-        print(f"In offboard callback at {self.time_from_start:.2f} seconds")
+        print(f"{BANNER}In offboard callback at {self.time_from_start:.2f} seconds")
 
         if not self.offboard_mode_rc_switch_on: #integration of RC 'killswitch' for offboard to send heartbeat signal, engage offboard, and arm
             print(f"Offboard Callback: RC Flight Mode Channel {self.MODE_CHANNEL} Switch Not Set to Offboard (-1: position, 0: offboard, 1: land) ")
@@ -494,6 +496,7 @@ class OffboardControl(Node):
 
     def control_algorithm_callback(self) -> None:
         """Callback function to handle control algorithm once in offboard mode."""
+        print(f"{BANNER}In control callback at time: ", time.time() - self.T0)  
         self.time_from_start = time.time() - self.T0
         t = self.time_from_start
         if not (self.offboard_mode_rc_switch_on and (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD) ):
@@ -547,7 +550,7 @@ class OffboardControl(Node):
 
     def control_administrator(self) -> None:
         self.time_from_start = time.time() - self.T0
-        print(f"\nIn control administrator at {self.time_from_start:.2f} seconds")
+        print(f"{BANNER}In control administrator at {self.time_from_start:.2f} seconds")
         ref_nr = self.get_ref(self.time_from_start)
 
         ctrl_T0 = time.time()
@@ -587,7 +590,7 @@ class OffboardControl(Node):
         print("==" * 30)
 
     def update_lqr_feedback(self, sys, state, input, noise):
-            print(f"\nUPDATING LQR")
+            print(f"{BANNER}UPDATING LQR")
             t0 = time.time()
             A, B = jitted_linearize_system(sys, state, input, noise)  # Linearize the system dynamics
             K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
@@ -612,7 +615,7 @@ class OffboardControl(Node):
     def rta_mm_gpr_administrator(self, state, input):
         """Run the RTA-MM administrator to compute the control inputs."""
         self.time_from_start = time.time() - self.T0 # Update time from start of the program
-        print(f"\nIn RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
+        print(f"{BANNER}In RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
 
         t0 = time.time()  # Start time for RTA-MM GPR computation
         current_state = self.rta_mm_gpr_state_vector_planar # Get the current state vector
