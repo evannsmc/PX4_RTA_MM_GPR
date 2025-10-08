@@ -1,6 +1,6 @@
 import math as m
 
-MASS: float = 1.92 # (kg) mass of the multirotor
+MASS: float = 2.0 # (kg) mass of the multirotor
 
 THRUST_CONSTANT: float = 8.54858e-06 #x500 gazebo simulation motor thrust constant
 MOTOR_VELOCITY_ARMED: float = 10.0 #x500 gazebo motor velocity when armed

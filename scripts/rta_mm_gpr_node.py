@@ -6,7 +6,7 @@ from rclpy.qos import (QoSProfile,
 from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
-    VehicleStatus, VehicleFullState, #Import PX4 ROS2-API messages for receiving vehicle state information
+    VehicleStatus, FullState, #Import PX4 ROS2-API messages for receiving vehicle state information
     RcChannels
 )
 
@@ -95,9 +95,14 @@ class OffboardControl(Node):
         # Create subscribers
         # Create subscribers
         self.vehicle_odometry_subscriber = self.create_subscription(
-            VehicleFullState, '/fmu/out/vehicle_full_state', self.vehicle_odometry_subscriber_callback, qos_profile)
+            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile)
+        
+
+        self.in_offboard_mode: bool = False       
+        self.armed: bool = False
+        self.in_land_mode: bool = False
         self.vehicle_status_subscriber = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_subscriber_callback, qos_profile)
+            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
             
         self.offboard_mode_rc_switch_on: bool = True if self.sim else False   # RC switch related variables and subscriber
         print(f"RC switch mode: {'On' if self.offboard_mode_rc_switch_on else 'Off'}")
@@ -118,7 +123,8 @@ class OffboardControl(Node):
 
         # Callback function time constants
         self.heartbeat_period: float = 0.1 # (s) We want 10Hz for offboard heartbeat signal
-        self.control_period: float = 0.01 # (s) We want 1000Hz for direct control algorithm
+        self.control_period: float = 0.01 # (s) We want 100Hz for direct control algorithm
+        self.wind_estimate_period: float = 0.1 # (s) We want 10Hz for wind estimation update
         self.traj_idx = 0 # Index for trajectory setpoint
 
         self.OBS_DYN = jnp.array([
@@ -133,7 +139,7 @@ class OffboardControl(Node):
                                                self.control_algorithm_callback) #My control algorithm needs to execute at >= 100Hz
         self.rollout_timer = self.create_timer(self.control_period,
                                                self.rollout_callback) #My rollout function needs to execute at >= 100Hz
-        self.wind_estimator = self.create_timer(self.heartbeat_period,
+        self.wind_estimator = self.create_timer(self.wind_estimate_period,
                                                 self.wind_estimator_callback)
 
         self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
@@ -201,7 +207,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(0.0, ix0, x0, K_feedback, K_reference, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -234,17 +240,18 @@ class OffboardControl(Node):
 
         # Initialize rta_mm_gpr variables
         self.GOAL_STATE = jnp.array([0., -0.6, 0., 0., 0.])
-        n_obs = 9
         x0 = jnp.array(init_state[0:5])  # Initial state vector for testing
 
-        initialization_values_GP = jnp.array([[-2, 0.0], #make the second column all zeros
-                                        [0, 0.0],
-                                        [2, 0.0],
-                                        [4, 0.0],
-                                        [6, 0.0],
-                                        [8, 0.0],
-                                        [10, 0.0],
-                                        [12, 0.0]]) # at heights of y in the first column, disturbance to the values in the second column
+        np.random.seed(0)
+
+        initialization_values_GP = jnp.array([[-2, np.random.rand()], #make the second column all zeros
+                                        [0, np.random.rand()],
+                                        [2, np.random.rand()],
+                                        [4, np.random.rand()],
+                                        [6, np.random.rand()],
+                                        [8, np.random.rand()],
+                                        [10, np.random.rand()],
+                                        [12, np.random.rand()]]) # at heights of y in the first column, disturbance to the values in the second column
         # add a time dimension at t=0 to the GP instantiation values for TVGPR instantiation
         initialization_GP = TVGPR(jnp.hstack((jnp.zeros((initialization_values_GP.shape[0], 1)), initialization_values_GP)), 
                                             sigma_f = 5.0, 
@@ -253,7 +260,6 @@ class OffboardControl(Node):
                                             epsilon=0.1,
                                             discrete=False
                                             )
-        self.obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(n_obs,1))
 
 
         self.x_pert = 1e-4 * jnp.array([1., 1., 1., 1., 1.])
@@ -264,19 +270,26 @@ class OffboardControl(Node):
 
 
         # Initialize rollout parameters
-        self.wnd_cnt = 0
-        self.wind_obs = NpToJaxDrainRing()
+        n_obs = 9
+        obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(n_obs,1))
+        self.obs = obs
+        # self.wind_obs_z0 = obs
+
+        self.wind_count = 0
+        self.wind_obs_z = obs   # for example, 500 rows of 3-D data for wind observations in y-direction at various time and & z-heights
+
+
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
         self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
         self.Q_planar = jnp.array([10, 5, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
-        self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
+        self.R_planar = jnp.array([1, 5]) * jnp.eye(2)
 
 
         #(py,pz,h,v,theta)
         # self.Q_ref_planar = jnp.array([50, 50, 200, 200, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
 
-        self.Q_ref_planar =jnp.array([50, 20, 50, 20, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
-        self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
+        self.Q_ref_planar =jnp.array([50, 10, 50, 10, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        self.R_ref_planar = jnp.array([20, 30]) * jnp.eye(2)
 
 
 
@@ -303,7 +316,11 @@ class OffboardControl(Node):
         print(f"Collection ID: {violation_safety_time_idx}")
         print(f"Applied u: {applied_u}")
 
-        # exit(0)
+        # Pause for 3 seconds to give myself time to read the print statements above
+        print(f"\nPausing for 3 seconds to read the JIT compilation times above.\nContinuing...\n")
+        time.sleep(3)
+
+
 
     def rc_channel_subscriber_callback(self, rc_channels):
         """Callback function for RC Channels to create a software 'killswitch' depending on our flight mode channel (position vs offboard vs land mode)"""
@@ -317,7 +334,8 @@ class OffboardControl(Node):
 
         self.x = msg.position[0]
         self.y = msg.position[1]
-        self.z = msg.position[2] + (1.0 * self.sim) # Adjust z for simulation, new gazebo model has ground level at around -1.39m 
+        self.z = (msg.position[2] + 0.5) if (self.sim and (abs(msg.position[2]) < 1.2)) else msg.position[2]  # Adjust for sim ground level if needed
+
         self.vx = msg.velocity[0]
         self.vy = msg.velocity[1]
         self.vz = msg.velocity[2]
@@ -380,35 +398,91 @@ class OffboardControl(Node):
     def wind_estimator_callback(self):
         """Callback function for the wind estimation callback"""
         print(f"{BANNER}In wind callback")
-        if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
-            try:
-                _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
-                print(f"{ay_hat = }, {az_hat = }")
-                print(f"{self.ay}, {self.az}")
-
-                ay_wind = (self.ay - ay_hat)
-                gz_windforce = self.MASS * ay_wind
-
-                wind_data = np.array([time.time() - self.T0, self.z, gz_windforce])
-                print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
-                self.wind_obs.add(wind_data)
-                print(f"{len(self.wind_obs)=}")
+        if not self.in_offboard_mode:
+            print("Not in offboard mode, skipping wind estimation")
+            return
+        
 
 
+        print(f"In offboard mode! Run once and exit: {time.time() - self.T0}")
 
-            except AttributeError as e: # for if we 
-                frame = inspect.currentframe()
-                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
-                print(f"\nError in {__name__}:{func_name}: {e}")
-                traceback.print_exc()                
-                return
-            except Exception as e:
-                print(f"Exception!")
-                frame = inspect.currentframe()
-                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
-                print(f"\nError in {__name__}:{func_name}: {e}")
-                traceback.print_exc()
-                raise  # Re-raise  
+        _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
+        print(f"{ay_hat = }, {az_hat = }")
+        print(f"{self.ay}, {self.az}")
+
+        ay_wind = (self.ay - ay_hat)
+        gz_windforce = self.MASS * ay_wind
+
+        wind_estimate_time = time.time() - self.T0
+        wind_data = (wind_estimate_time, self.z, gz_windforce)
+        wind_idx = self.wind_count % self.wind_obs_z.shape[0]
+        self.wind_obs_z = self.obs #self.wind_obs_z.at[wind_idx, :].set(jnp.array(wind_data))
+
+        print(f"{self.wind_obs_z.shape[0]=}")
+        print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
+        print(f"Wind buffer: {self.wind_obs_z}")
+        print(f"Regular wind {self.obs}")
+        print(f"{type(self.obs)=}, {type(self.wind_obs_z)=}")
+        self.wind_count += 1
+        
+        # if self.wind_count % 50 == 0:
+        #     tr0 = time.time()
+        #     print("Running rollout after wind update")
+        #     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+
+        #     self.reachable_tube.block_until_ready()
+        #     self.rollout_ref.block_until_ready()
+        #     self.rollout_feedfwd_input.block_until_ready()
+
+        #     print(f"{self.reachable_tube=}")
+
+        #     print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
+
+            # exit(0)
+
+        # if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
+        #     try:
+
+        
+        #         _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
+        #         print(f"{ay_hat = }, {az_hat = }")
+        #         print(f"{self.ay}, {self.az}")
+
+        #         ay_wind = (self.ay - ay_hat)
+        #         gz_windforce = self.MASS * ay_wind
+
+        #         self.wind_count += 1
+        #         wind_estimate_time = time.time() - self.T0
+        #         wind_data = (wind_estimate_time, self.z, gz_windforce)
+        #         wind_idx = self.wind_count % self.wind_obs_z.shape[0]
+        #         self.wind_obs_z = self.wind_obs_z.at[wind_idx, :].set(jnp.array(wind_data))
+        #         print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
+        #         print(f"Wind buffer: {self.wind_obs_z}")
+        #         exit(0)
+
+
+
+        #     except AttributeError as e: # for if we 
+        #         frame = inspect.currentframe()
+        #         func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+        #         print(f"\nError in {__name__}:{func_name}: {e}")
+        #         traceback.print_exc()                
+        #         exit(0)
+        #     except Exception as e:
+        #         print(f"Exception!")
+        #         frame = inspect.currentframe()
+        #         func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+        #         print(f"\nError in {__name__}:{func_name}: {e}")
+        #         traceback.print_exc()
+        #         raise  # Re-raise  
+        #         exit(0)
+
+        #     exit(0)
+
+        # else:
+        #     if self.time_from_start < self.begin_actuator_control - 1.0:
+        #         print("Waiting to enter flight mode for wind estimation")
+        #         print("Not in flight mode for wind estimation")
 
 
     def rollout_callback(self):
@@ -426,13 +500,29 @@ class OffboardControl(Node):
 
                 if current_time >= self.collection_time:
                     print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
-                    # t0 = time.time()  # Reset time for rollout computation
-                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                        current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.obs, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE
-                    )
+
+
+                    tr0 = time.time()
+                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), current_state_interval, self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
                     self.rollout_feedfwd_input.block_until_ready()
+
+                    print(f"{self.reachable_tube=}")
+
+                    print(f"rollout calc time: {time.time() - tr0} seconds")
+
+
+
+
+                    # self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
+                    #     current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE
+                    # )
+
+                    # self.reachable_tube.block_until_ready()
+                    # self.rollout_ref.block_until_ready()
+                    # self.rollout_feedfwd_input.block_until_ready()
                     # print(f"Time taken by rollout: {time.time() - t0:.4f} seconds")
 
                     # t0 = time.time()  # Reset time for collection index computation
@@ -465,9 +555,23 @@ class OffboardControl(Node):
         else:
             pass
 
-    def vehicle_status_subscriber_callback(self, vehicle_status) -> None:
+    def vehicle_status_callback(self, vehicle_status):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
+        self.in_offboard_mode = (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
+        self.armed = (self.vehicle_status.arming_state == VehicleStatus.ARMING_STATE_ARMED)
+        self.in_land_mode = (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LAND)
+
+        if not self.in_offboard_mode:
+            print(f"{BANNER}"
+                  f"Not in offboard mode yet!"
+                  f"Current vehicle status: {vehicle_status.nav_state}\n"
+                  f"{VehicleStatus.NAVIGATION_STATE_OFFBOARD = }\n"
+                  f"{self.armed=}\n"
+                  f"{self.in_land_mode=}\n"
+                  f"{BANNER}")
+            return
+        print(f"{BANNER}In Offboard Mode!{BANNER}")
 
     def offboard_heartbeat_signal_callback(self) -> None:
         """Callback function for the heartbeat signals that maintains flight controller in offboard mode and switches between offboard flight modes."""
