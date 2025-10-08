@@ -207,7 +207,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -270,29 +270,26 @@ class OffboardControl(Node):
 
 
         # Initialize rollout parameters
-        n_obs = 9
-        obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(n_obs,1))
+        self.n_obs = 9
+        obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(self.n_obs,1))
         self.obs = obs
         # self.wind_obs_z0 = obs
 
         self.wind_count = 0
-        self.wind_obs_z = obs   # for example, 500 rows of 3-D data for wind observations in y-direction at various time and & z-heights
-
+        self.gz_wind_obs_in_y = obs   # for example, 500 rows of 3-D data for wind observations in y-direction at various time and & z-heights
+        self.gy_wind_obs_in_z = obs   # for example, 500 rows of 3-D data for wind observations in z-direction at various time and & y-heights
 
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
         self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
         self.Q_planar = jnp.array([10, 5, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
-        self.R_planar = jnp.array([1, 5]) * jnp.eye(2)
+        self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
 
 
         #(py,pz,h,v,theta)
         # self.Q_ref_planar = jnp.array([50, 50, 200, 200, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
 
-        self.Q_ref_planar =jnp.array([50, 10, 50, 10, 10]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
-        self.R_ref_planar = jnp.array([20, 30]) * jnp.eye(2)
-
-
-
+        self.Q_ref_planar =jnp.array([50, 20, 50, 20, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
         t0 = 0.0  # Initial time
@@ -402,87 +399,51 @@ class OffboardControl(Node):
             print("Not in offboard mode, skipping wind estimation")
             return
         
+        wind_estimate_time = time.time() - self.T0
 
 
-        print(f"In offboard mode! Run once and exit: {time.time() - self.T0}")
-
+        # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
         _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
         print(f"{ay_hat = }, {az_hat = }")
         print(f"{self.ay}, {self.az}")
 
+        # Estimate wind disturbance force in y-direction
         ay_wind = (self.ay - ay_hat)
-        gz_windforce = self.MASS * ay_wind
+        gz_windforce_in_y = self.MASS * ay_wind
 
-        wind_estimate_time = time.time() - self.T0
-        wind_data = (wind_estimate_time, self.z, gz_windforce)
-        wind_idx = self.wind_count % self.wind_obs_z.shape[0]
-        self.wind_obs_z = self.obs #self.wind_obs_z.at[wind_idx, :].set(jnp.array(wind_data))
 
-        print(f"{self.wind_obs_z.shape[0]=}")
-        print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
-        print(f"Wind buffer: {self.wind_obs_z}")
-        print(f"Regular wind {self.obs}")
-        print(f"{type(self.obs)=}, {type(self.wind_obs_z)=}")
+        # Estimate wind disturbance force in z-direction
+        az_wind = (self.az - az_hat)
+        gy_windforce_in_z = self.MASS * az_wind
+
+        # Prep to fill in wind observation data for GPR
+        wind_idx = self.wind_count % self.n_obs
         self.wind_count += 1
+
+        gz_windforce_GPR_data_y = (wind_estimate_time, self.z, gz_windforce_in_y)
+        self.gz_wind_obs_in_y.at[wind_idx, :].set(jnp.array(gz_windforce_GPR_data_y))
+
+
+        gy_windforce_GPR_data_z = (wind_estimate_time, self.y, gy_windforce_in_z)
+        self.gy_wind_obs_in_z.at[wind_idx, :].set(jnp.array(gy_windforce_GPR_data_z))
+
+
+        print(f"Wind in Y be added to buffer: [T, HEIGHT, WIND_CALC]: {gz_windforce_GPR_data_y}")
+        print(f"Wind in Z be added to buffer: [T, HEIGHT, WIND_CALC]: {gy_windforce_GPR_data_z}")
+        print(f"Default fake wind {self.obs}")
         
-        # if self.wind_count % 50 == 0:
-        #     tr0 = time.time()
-        #     print("Running rollout after wind update")
-        #     self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+        if self.wind_count % 50 == 0 and wind_estimate_time < self.begin_actuator_control:
+            tr0 = time.time()
+            print("Running rollout after wind update")
+            self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
 
-        #     self.reachable_tube.block_until_ready()
-        #     self.rollout_ref.block_until_ready()
-        #     self.rollout_feedfwd_input.block_until_ready()
+            self.reachable_tube.block_until_ready()
+            self.rollout_ref.block_until_ready()
+            self.rollout_feedfwd_input.block_until_ready()
 
-        #     print(f"{self.reachable_tube=}")
+            print(f"{self.reachable_tube=}")
 
-        #     print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
-
-            # exit(0)
-
-        # if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
-        #     try:
-
-        
-        #         _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
-        #         print(f"{ay_hat = }, {az_hat = }")
-        #         print(f"{self.ay}, {self.az}")
-
-        #         ay_wind = (self.ay - ay_hat)
-        #         gz_windforce = self.MASS * ay_wind
-
-        #         self.wind_count += 1
-        #         wind_estimate_time = time.time() - self.T0
-        #         wind_data = (wind_estimate_time, self.z, gz_windforce)
-        #         wind_idx = self.wind_count % self.wind_obs_z.shape[0]
-        #         self.wind_obs_z = self.wind_obs_z.at[wind_idx, :].set(jnp.array(wind_data))
-        #         print(f"Wind data to be added to buffer: [T, HEIGHT, WIND_CALC]: {wind_data}")
-        #         print(f"Wind buffer: {self.wind_obs_z}")
-        #         exit(0)
-
-
-
-        #     except AttributeError as e: # for if we 
-        #         frame = inspect.currentframe()
-        #         func_name = frame.f_code.co_name if frame is not None else "<unknown>"
-        #         print(f"\nError in {__name__}:{func_name}: {e}")
-        #         traceback.print_exc()                
-        #         exit(0)
-        #     except Exception as e:
-        #         print(f"Exception!")
-        #         frame = inspect.currentframe()
-        #         func_name = frame.f_code.co_name if frame is not None else "<unknown>"
-        #         print(f"\nError in {__name__}:{func_name}: {e}")
-        #         traceback.print_exc()
-        #         raise  # Re-raise  
-        #         exit(0)
-
-        #     exit(0)
-
-        # else:
-        #     if self.time_from_start < self.begin_actuator_control - 1.0:
-        #         print("Waiting to enter flight mode for wind estimation")
-        #         print("Not in flight mode for wind estimation")
+            print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
 
 
     def rollout_callback(self):
@@ -503,17 +464,17 @@ class OffboardControl(Node):
 
 
                     tr0 = time.time()
-                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), current_state_interval, self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+
+                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
 
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
                     self.rollout_feedfwd_input.block_until_ready()
 
-                    print(f"{self.reachable_tube=}")
+
+                    print(f"{self.reachable_tube[0:3,:]=}")
 
                     print(f"rollout calc time: {time.time() - tr0} seconds")
-
-
 
 
                     # self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
@@ -536,6 +497,7 @@ class OffboardControl(Node):
 
                     self.traj_idx = 0
                     self.save_tube = self.reachable_tube[:50:10, [1, 2, 6, 7]]
+                    # exit(0)
 
 
                 else:
@@ -554,6 +516,7 @@ class OffboardControl(Node):
                 raise  # Re-raise  
         else:
             pass
+
 
     def vehicle_status_callback(self, vehicle_status):
         """Callback function for vehicle_status topic subscriber."""
