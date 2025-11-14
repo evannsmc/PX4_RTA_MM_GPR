@@ -78,7 +78,7 @@ class OffboardControl(Node):
         self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
 
         self.tube_start = 3
-        self.tube_extent = 26
+        self.tube_extent = 29
         self.tube_skip = 4
 
         tube_start = self.tube_start
