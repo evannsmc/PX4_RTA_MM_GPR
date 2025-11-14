@@ -143,6 +143,7 @@ class OffboardControl(Node):
                                                 self.wind_estimator_callback)
 
         self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
+        self.T0 = time.time()  # Reset initial time after JIT compilation
 
         self.last_lqr_update_time: float = 0.0  # Initialize last LQR update time
         self.first_LQR: bool = True  # Flag to indicate if this is the first LQR update
@@ -410,11 +411,13 @@ class OffboardControl(Node):
         # Estimate wind disturbance force in y-direction
         ay_wind = (self.ay - ay_hat)
         gz_windforce_in_y = self.MASS * ay_wind
+        self.wy = gz_windforce_in_y
 
 
         # Estimate wind disturbance force in z-direction
         az_wind = (self.az - az_hat)
         gy_windforce_in_z = self.MASS * az_wind
+        self.wz = gy_windforce_in_z
 
         # Prep to fill in wind observation data for GPR
         wind_idx = self.wind_count % self.n_obs
@@ -428,9 +431,9 @@ class OffboardControl(Node):
         self.gy_wind_obs_in_z.at[wind_idx, :].set(jnp.array(gy_windforce_GPR_data_z))
 
 
-        print(f"Wind in Y be added to buffer: [T, HEIGHT, WIND_CALC]: {gz_windforce_GPR_data_y}")
-        print(f"Wind in Z be added to buffer: [T, HEIGHT, WIND_CALC]: {gy_windforce_GPR_data_z}")
-        print(f"Default fake wind {self.obs}")
+        # print(f"Wind in Y be added to buffer: [T, HEIGHT, WIND_CALC]: {gz_windforce_GPR_data_y}")
+        # print(f"Wind in Z be added to buffer: [T, HEIGHT, WIND_CALC]: {gy_windforce_GPR_data_z}")
+        # print(f"Default fake wind {self.obs}")
         
         if self.wind_count % 50 == 0 and wind_estimate_time < self.begin_actuator_control:
             tr0 = time.time()
