@@ -121,9 +121,6 @@ class OffboardControl(Node):
         # Initialize essential variables
         self.sim: bool = sim
         self.GRAVITY: float = 9.806 # m/s^2, gravitational acceleration
-        
-        self.wind_ekf = WindEKF(mass=self.MASS)
-        self.USE_EKF = True
 
         if self.sim:
             print("Using simulator constants and functions")
@@ -136,6 +133,8 @@ class OffboardControl(Node):
             self.MASS = hardware_utilities.MASS
             self.get_throttle_command_from_force = hardware_utilities.get_throttle_command_from_force
 
+        self.wind_ekf = WindEKF(mass=self.MASS)
+        self.USE_EKF = True
 
 
         # Logging related variables
