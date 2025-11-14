@@ -23,7 +23,6 @@ from px4_rta_mm_gpr.utilities.jax_setup import jit
 from px4_rta_mm_gpr.jax_mm_rta import *
 from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original, dynamics
-# from px4_rta_mm_gpr.jax_nr import C as OBS_MATRIX
 from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
 
 import immrax as irx
@@ -54,20 +53,23 @@ class OffboardControl(Node):
 
         # Logging related variables
         self.time_log = LogType("time", 0)
+
         self.x_log = LogType("x", 1)
         self.y_log = LogType("y", 2)
         self.z_log = LogType("z", 3)
         self.yaw_log = LogType("yaw", 4)
+
         self.ctrl_comp_time_log = LogType("ctrl_comp_time", 5)
-        self.x_ref_log = LogType("x_ref", 6)
-        self.y_ref_log = LogType("y_ref", 7)
-        self.z_ref_log = LogType("z_ref", 8)
-        self.yaw_ref_log = LogType("yaw_ref", 9)
-        self.throttle_log = LogType("throttle", 10)
-        self.roll_rate_log = LogType("roll_rate", 11)
-        self.pitch_rate_log = LogType("pitch_rate", 12)
-        self.yaw_rate_log = LogType("yaw_rate", 13)
-        self.save_tube_log = VectorLogType("save_tube", 14, ['pyL', 'pzL', 'pyH', 'pzH'])
+        self.rollout_comptime_log = LogType("rollout_comptime", 6)
+        self.x_ref_log = LogType("x_ref", 7)
+        self.y_ref_log = LogType("y_ref", 8)
+        self.z_ref_log = LogType("z_ref", 9)
+        self.yaw_ref_log = LogType("yaw_ref", 10)
+        self.throttle_log = LogType("throttle", 11)
+        self.roll_rate_log = LogType("roll_rate", 12)
+        self.pitch_rate_log = LogType("pitch_rate", 13)
+        self.yaw_rate_log = LogType("yaw_rate", 14)
+        self.save_tube_log = VectorLogType("save_tube", 15, ['pyL', 'pzL', 'pyH', 'pzH'])
 
 
         self.metadata = np.array(['Sim' if self.sim else 'Hardware',
@@ -475,8 +477,8 @@ class OffboardControl(Node):
 
 
                     # print(f"{self.reachable_tube[0:3,:]=}")
-
-                    print(f"rollout calc time: {time.time() - tr0} seconds")
+                    self.rollout_comptime = time.time() - tr0
+                    print(f"rollout calc time: {self.rollout_comptime} seconds")
 
 
                     # self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
@@ -650,6 +652,7 @@ class OffboardControl(Node):
         state_input_ref_log_info = [self.time_from_start,
                                     float(self.x), float(self.y), float(self.z), float(self.yaw),
                                     control_comp_time,
+                                    self.rollout_comptime,
                                     0., self.y_ref, self.z_ref, self.yaw_ref,
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                                     ]
@@ -720,19 +723,24 @@ class OffboardControl(Node):
     def update_logged_data(self, data):
         print("Updating Logged Data")
         self.time_log.append(data[0])
+
         self.x_log.append(data[1])
         self.y_log.append(data[2])
         self.z_log.append(data[3])
         self.yaw_log.append(data[4])
+
         self.ctrl_comp_time_log.append(data[5])
-        self.x_ref_log.append(data[6])
-        self.y_ref_log.append(data[7])
-        self.z_ref_log.append(data[8])
-        self.yaw_ref_log.append(data[9])
-        self.throttle_log.append(data[10])
-        self.roll_rate_log.append(data[11])
-        self.pitch_rate_log.append(data[12])
-        self.yaw_rate_log.append(data[13])
+        self.rollout_comptime_log.append(6)
+
+        self.x_ref_log.append(data[7])
+        self.y_ref_log.append(data[8])
+        self.z_ref_log.append(data[9])
+        self.yaw_ref_log.append(data[10])
+
+        self.throttle_log.append(data[11])
+        self.roll_rate_log.append(data[12])
+        self.pitch_rate_log.append(data[13])
+        self.yaw_rate_log.append(data[14])
 
     def update_tube_data(self, data):
         # print(f"Updating Tube Log:")
