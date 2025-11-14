@@ -758,7 +758,7 @@ class OffboardControl(Node):
         self.yaw_log.append(data[4])
 
         self.ctrl_comp_time_log.append(data[5])
-        self.rollout_comptime_log.append(6)
+        self.rollout_comptime_log.append(data[6])
 
         self.throttle_log.append(data[11])
         self.roll_rate_log.append(data[12])
