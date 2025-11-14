@@ -31,12 +31,99 @@ from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports
 
 BANNER = '\n' + "==" * 30 + '\n'
 
+class WindEKF:
+    def __init__(self, mass, Q=None, R=None):
+        """
+        EKF/KF for estimating wind disturbance forces in y, z [N].
+
+        State: x = [w_y, w_z]^T
+        Measurement: z = [ay_meas, az_meas]^T
+          z = a_model + (1/m) * x + noise
+        """
+        self.m = mass
+
+        # State: start with zero wind
+        self.x = np.zeros((2, 1))  # [w_y; w_z]
+        self.P = np.eye(2) * 1.0   # initial covariance, tune as needed
+
+        # Process noise covariance (how fast wind can change)
+        if Q is None:
+            # e.g. 0.1 N^2 per step on each axis
+            self.Q = np.eye(2) * 0.1
+        else:
+            self.Q = np.array(Q, dtype=float)
+
+        # Measurement noise covariance (accel noise + model error)
+        if R is None:
+            # e.g. (0.1 m/s^2)^2 on each axis
+            sigma_a = 0.1
+            self.R = np.eye(2) * (sigma_a ** 2)
+        else:
+            self.R = np.array(R, dtype=float)
+
+        # Constant matrices
+        self.F = np.eye(2)
+        self.H = (1.0 / self.m) * np.eye(2)  # maps [w_y, w_z] -> accel contribution
+
+    def predict(self):
+        """
+        Time update (no input; wind is modeled as random walk).
+        """
+        # x_{k+1|k} = F x_{k|k}
+        self.x = self.F @ self.x
+        # P_{k+1|k} = F P F^T + Q
+        self.P = self.F @ self.P @ self.F.T + self.Q
+
+    def update(self, ay_meas, az_meas, ay_model, az_model):
+        """
+        Measurement update.
+
+        ay_meas, az_meas: measured accelerations [m/s^2]
+        ay_model, az_model: model-predicted accel from your dynamics [m/s^2]
+
+        Returns:
+            wy, wz: updated estimates of wind forces [N]
+        """
+        # Measurement vector
+        z = np.array([[ay_meas],
+                      [az_meas]])
+
+        # Model accel vector (acts as known offset)
+        a_model = np.array([[ay_model],
+                            [az_model]])
+
+        # Predicted measurement: z_hat = a_model + H x_{k+1|k}
+        z_hat = a_model + self.H @ self.x
+
+        # Innovation
+        y = z - z_hat
+
+        # Innovation covariance
+        S = self.H @ self.P @ self.H.T + self.R
+
+        # Kalman gain
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        # State update
+        self.x = self.x + K @ y
+
+        # Covariance update
+        I = np.eye(2)
+        self.P = (I - K @ self.H) @ self.P
+
+        # Return wind forces
+        wy, wz = self.x.flatten()
+        return wy, wz
+
 class OffboardControl(Node):
     def __init__(self, sim: bool) -> None:
         super().__init__('px4_rta_mm_gpr_node')
         # Initialize essential variables
         self.sim: bool = sim
         self.GRAVITY: float = 9.806 # m/s^2, gravitational acceleration
+        
+        self.wind_ekf = WindEKF(mass=self.MASS)
+        self.USE_EKF = True
 
         if self.sim:
             print("Using simulator constants and functions")
@@ -428,23 +515,44 @@ class OffboardControl(Node):
         wind_estimate_time = time.time() - self.T0
 
 
-        # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
-        _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
-        print(f"{ay_hat = }, {az_hat = }")
-        print(f"{self.ay}, {self.az}")
-        tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
+        if not self.USE_EKF:
+            # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
+            _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
+            print(f"{ay_hat = }, {az_hat = }")
+            print(f"{self.ay}, {self.az}")
+            tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
 
 
-        # Estimate wind disturbance force in y-direction
-        ay_wind = (self.ay - ay_hat) 
-        gz_windforce_in_y = self.MASS * ay_wind
-        self.wy = gz_windforce_in_y
+            # Estimate wind disturbance force in y-direction
+            ay_wind = (self.ay - ay_hat) 
+            gz_windforce_in_y = self.MASS * ay_wind
+            self.wy = gz_windforce_in_y
 
 
-        # Estimate wind disturbance force in z-direction
-        az_wind = (self.az - az_hat)
-        gy_windforce_in_z = self.MASS * az_wind
-        self.wz = gy_windforce_in_z
+            # Estimate wind disturbance force in z-direction
+            az_wind = (self.az - az_hat)
+            gy_windforce_in_z = self.MASS * az_wind
+            self.wz = gy_windforce_in_z
+        else:
+            # Predict step
+            self.wind_ekf.predict()
+
+            # Your existing model prediction:
+            _, ay_hat, az_hat = self.OBS_DYN @ dynamics(self.nr_state_vector,
+                                                        self.last_input,
+                                                        self.MASS)
+
+            # Update step with measurements
+            self.wy, self.wz = self.wind_ekf.update(
+                ay_meas=self.ay,
+                az_meas=self.az,
+                ay_model=ay_hat,
+                az_model=az_hat,
+            )
+            gz_windforce_in_y = self.wy
+            gy_windforce_in_z = self.wz
+
+
 
         # Prep to fill in wind observation data for GPR
         wind_idx = self.wind_count % self.n_obs
