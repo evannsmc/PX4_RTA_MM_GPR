@@ -61,17 +61,19 @@ class OffboardControl(Node):
 
         self.ctrl_comp_time_log = LogType("ctrl_comp_time", 5)
         self.rollout_comptime_log = LogType("rollout_comptime", 6)
-        self.x_ref_log = LogType("x_ref", 7)
-        self.y_ref_log = LogType("y_ref", 8)
-        self.z_ref_log = LogType("z_ref", 9)
-        self.yaw_ref_log = LogType("yaw_ref", 10)
-        self.throttle_log = LogType("throttle", 11)
-        self.roll_rate_log = LogType("roll_rate", 12)
-        self.pitch_rate_log = LogType("pitch_rate", 13)
-        self.yaw_rate_log = LogType("yaw_rate", 14)
-        self.save_tube_log = VectorLogType("save_tube", 15, ['pyL', 'pzL', 'pyH', 'pzH'])
-        self.wy_log = LogType("wy", 16)
-        self.wz_log = LogType("wz", 17)
+
+        self.y_ref_log = LogType("y_ref", 7)
+        self.z_ref_log = LogType("z_ref", 8)
+        self.yaw_ref_log = LogType("yaw_ref", 9)
+
+        self.throttle_log = LogType("throttle", 10)
+        self.roll_rate_log = LogType("roll_rate", 11)
+        self.pitch_rate_log = LogType("pitch_rate", 12)
+        self.yaw_rate_log = LogType("yaw_rate", 13)
+
+        self.save_tube_log = VectorLogType("save_tube", 14, ['pyL', 'pzL', 'pyH', 'pzH'])
+        self.wy_log = LogType("wy", 15)
+        self.wz_log = LogType("wz", 16)
 
         self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
         self.tube_time_indices = slice(0,26,4)
@@ -678,6 +680,11 @@ class OffboardControl(Node):
         self.update_logged_data(state_input_ref_log_info)
         for reach_set in self.save_tube:
             self.update_tube_data(reach_set)
+
+        for i in range(len(self.y_ref)):
+            ref_data = [self.y_ref[i], self.z_ref[i], self.yaw_ref[i]]
+            self.update_ref_data(ref_data)
+
         print("==" * 30)
 
     def update_lqr_feedback(self, sys, state, input, noise):
@@ -753,11 +760,6 @@ class OffboardControl(Node):
         self.ctrl_comp_time_log.append(data[5])
         self.rollout_comptime_log.append(6)
 
-        # self.x_ref_log.append(data[7])
-        # self.y_ref_log.append(data[8])
-        # self.z_ref_log.append(data[9])
-        # self.yaw_ref_log.append(data[10])
-
         self.throttle_log.append(data[11])
         self.roll_rate_log.append(data[12])
         self.pitch_rate_log.append(data[13])
@@ -767,6 +769,9 @@ class OffboardControl(Node):
         self.wz_log.append(data[16])
 
     def update_tube_data(self, data):
-        # print(f"Updating Tube Log:")
         self.save_tube_log.append(*data)
-        # exit(0)
+
+    def update_ref_data(self, data):
+        self.y_ref_log.append(data[0])
+        self.z_ref_log.append(data[1])
+        self.yaw_ref_log.append(data[2])
