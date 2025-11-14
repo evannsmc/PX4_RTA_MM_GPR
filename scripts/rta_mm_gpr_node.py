@@ -265,7 +265,8 @@ class OffboardControl(Node):
                                             )
 
 
-        self.x_pert = 1e-4 * jnp.array([1., 1., 1., 1., 1.])
+        # x0 = jnp.array([-20, -10, 0.0, 10.0, 20.0])  # Initial state vector for testing
+        self.x_pert = 5e-4 * jnp.array([1., 1., 1., 1., 1.]) # 
         ix0 = irx.icentpert(x0, self.x_pert)
         u0 = jnp.array(init_input[0:2])  # Initial input vector for testing
         w0 = jnp.array(init_noise)  # Initial noise vector for testing
@@ -312,9 +313,12 @@ class OffboardControl(Node):
 
         print(f"{A=},{B=}")
         print(f"{K_feedback=}\n{K_reference=}")
-        print(f"{reachable_tube=},{rollout_ref=},{rollout_feedfwd_input=}")
+        print(f"{reachable_tube[0:1, :]=}")
+        print(f"{rollout_ref=},{rollout_feedfwd_input=}")
+        print(f"{reachable_tube.shape = }, {rollout_ref.shape = }, {rollout_feedfwd_input.shape = }")
         print(f"Collection ID: {violation_safety_time_idx}")
         print(f"Applied u: {applied_u}")
+        # exit(0)
 
         # Pause for 3 seconds to give myself time to read the print statements above
         print(f"\nPausing for 3 seconds to read the JIT compilation times above.\nContinuing...\n")
@@ -448,6 +452,8 @@ class OffboardControl(Node):
 
             # print(f"{self.reachable_tube=}")
             print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
+            # print(f"{self.reachable_tube[0:1, :]=}")
+            # exit(0)
 
 
     def rollout_callback(self):
@@ -459,8 +465,8 @@ class OffboardControl(Node):
                 t00 = time.time()  # Start time for rollout computation
                 thresh = 1.0
                 current_time = self.time_from_start
-                current_state = self.rta_mm_gpr_state_vector_planar
-                current_state_interval = irx.icentpert(current_state, self.x_pert)
+                # current_state = self.rta_mm_gpr_state_vector_planar
+                # current_state_interval = irx.icentpert(current_state, self.x_pert)
                 print(f"{current_time= }, {self.collection_time= }")
 
                 if current_time >= self.collection_time:
@@ -500,7 +506,7 @@ class OffboardControl(Node):
                     print(f"{self.collection_time=}\n{safety_horizon=}")
 
                     self.traj_idx = 0
-                    self.save_tube = self.reachable_tube[:50:10, [1, 2, 6, 7]]
+                    self.save_tube = self.reachable_tube[:50:10, [0,1,5,6]]
                     # exit(0)
 
 

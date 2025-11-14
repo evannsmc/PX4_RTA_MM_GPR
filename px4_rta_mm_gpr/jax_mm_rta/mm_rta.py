@@ -290,7 +290,9 @@ if __name__ == "__main__":
     ulim_planar = irx.interval([0, -1],[19, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
     Q_planar = jnp.array([1, 1, 1, 1, 1]) * jnp.eye(quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
     R_planar = jnp.array([1, 1]) * jnp.eye(2)
-    Q_ref_planar =jnp.array([50, 20, 50, 20, 10]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+
+    # OR [50, 20, 50, 20, 10]
+    Q_ref_planar =jnp.array([50, 15, 50, 20, 10]) * jnp.eye(quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
     #(py,pz,h,v,theta)
     R_ref_planar = jnp.array([20, 20]) * jnp.eye(2)
 
