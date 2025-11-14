@@ -445,7 +445,6 @@ class OffboardControl(Node):
             self.rollout_feedfwd_input.block_until_ready()
 
             # print(f"{self.reachable_tube=}")
-
             print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
 
 
@@ -475,7 +474,7 @@ class OffboardControl(Node):
                     self.rollout_feedfwd_input.block_until_ready()
 
 
-                    print(f"{self.reachable_tube[0:3,:]=}")
+                    # print(f"{self.reachable_tube[0:3,:]=}")
 
                     print(f"rollout calc time: {time.time() - tr0} seconds")
 
