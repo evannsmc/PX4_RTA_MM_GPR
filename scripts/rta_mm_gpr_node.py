@@ -73,6 +73,13 @@ class OffboardControl(Node):
         self.wy_log = LogType("wy", 16)
         self.wz_log = LogType("wz", 17)
 
+        self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
+        self.tube_time_indices = slice(0,26,4)
+        self.num_save = len(range(*self.tube_time_indices.indices(26)))
+        print(f"{self.tube_time_indices=}, {self.tube_pos_indices=}, {self.num_save=}")
+        exit(0)
+
+
 
         self.metadata = np.array(['Sim' if self.sim else 'Hardware',
                                 ])
@@ -415,9 +422,11 @@ class OffboardControl(Node):
         _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
         print(f"{ay_hat = }, {az_hat = }")
         print(f"{self.ay}, {self.az}")
+        tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
+
 
         # Estimate wind disturbance force in y-direction
-        ay_wind = (self.ay - ay_hat)
+        ay_wind = (self.ay - ay_hat) 
         gz_windforce_in_y = self.MASS * ay_wind
         self.wy = gz_windforce_in_y
 
@@ -508,7 +517,8 @@ class OffboardControl(Node):
                     print(f"{self.collection_time=}\n{safety_horizon=}")
 
                     self.traj_idx = 0
-                    self.save_tube = self.reachable_tube[:26:4, [0,1,5,6]] # maybe mess with this
+
+                    self.save_tube = self.reachable_tube[self.tube_time_indices, self.tube_pos_indices] # maybe mess with this
                     # exit(0)
 
 
@@ -711,12 +721,14 @@ class OffboardControl(Node):
         self.traj_idx += 1 #update trajectory index
         print(f"Ultimate ref (y,z): {self.rollout_ref[-1,:2]}")
         print(f"{self.traj_idx=}")
-        
-        self.y_ref = self.rollout_ref[self.traj_idx, 0]
-        self.z_ref = self.rollout_ref[self.traj_idx, 1]
+
+
+        row_indices = slice(self.traj_idx, self.traj_idx + self.num_save)
+        self.y_ref = self.rollout_ref[row_indices, 0]
+        self.z_ref = self.rollout_ref[row_indices, 1]
+        self.yaw_ref = self.rollout_ref[row_indices, 4]
         # self.vy_ref = self.rollout_ref[self.traj_idx, 2]
         # self.vz_ref = self.rollout_ref[self.traj_idx, 3]
-        self.yaw_ref = self.rollout_ref[self.traj_idx, 4]
 
         PRINT_RTA_DEBUG = False  # Set to True to print debug information for RTA-MM GPR
         if PRINT_RTA_DEBUG:
@@ -741,10 +753,10 @@ class OffboardControl(Node):
         self.ctrl_comp_time_log.append(data[5])
         self.rollout_comptime_log.append(6)
 
-        self.x_ref_log.append(data[7])
-        self.y_ref_log.append(data[8])
-        self.z_ref_log.append(data[9])
-        self.yaw_ref_log.append(data[10])
+        # self.x_ref_log.append(data[7])
+        # self.y_ref_log.append(data[8])
+        # self.z_ref_log.append(data[9])
+        # self.yaw_ref_log.append(data[10])
 
         self.throttle_log.append(data[11])
         self.roll_rate_log.append(data[12])
