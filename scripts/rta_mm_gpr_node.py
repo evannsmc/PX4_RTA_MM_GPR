@@ -70,6 +70,8 @@ class OffboardControl(Node):
         self.pitch_rate_log = LogType("pitch_rate", 13)
         self.yaw_rate_log = LogType("yaw_rate", 14)
         self.save_tube_log = VectorLogType("save_tube", 15, ['pyL', 'pzL', 'pyH', 'pzH'])
+        self.wy_log = LogType("wy", 16)
+        self.wz_log = LogType("wz", 17)
 
 
         self.metadata = np.array(['Sim' if self.sim else 'Hardware',
@@ -661,6 +663,7 @@ class OffboardControl(Node):
                                     self.rollout_comptime,
                                     0., self.y_ref, self.z_ref, self.yaw_ref,
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
+                                    self.wy, self.wz
                                     ]
         self.update_logged_data(state_input_ref_log_info)
         for reach_set in self.save_tube:
@@ -747,6 +750,9 @@ class OffboardControl(Node):
         self.roll_rate_log.append(data[12])
         self.pitch_rate_log.append(data[13])
         self.yaw_rate_log.append(data[14])
+
+        self.wy_log.append(data[15])
+        self.wz_log.append(data[16])
 
     def update_tube_data(self, data):
         # print(f"Updating Tube Log:")
