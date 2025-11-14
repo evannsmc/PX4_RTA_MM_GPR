@@ -10,7 +10,7 @@ C = jnp.array([[1, 0, 0, 0, 0, 0, 0, 0, 0],
 
 
 
-# @jit
+@jit
 def dynamics(state, input, mass):
     """Quadrotor dynamics. xdot = f(x, u)."""
     x, y, z, vx, vy, vz, roll, pitch, yaw = state
