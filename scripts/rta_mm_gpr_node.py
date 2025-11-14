@@ -506,7 +506,7 @@ class OffboardControl(Node):
                     print(f"{self.collection_time=}\n{safety_horizon=}")
 
                     self.traj_idx = 0
-                    self.save_tube = self.reachable_tube[:50:10, [0,1,5,6]]
+                    self.save_tube = self.reachable_tube[:26:2, [0,1,5,6]] # maybe mess with this
                     # exit(0)
 
 
