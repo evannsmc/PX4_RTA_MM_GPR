@@ -77,7 +77,7 @@ class OffboardControl(Node):
         self.tube_time_indices = slice(0,26,4)
         self.num_save = len(range(*self.tube_time_indices.indices(26)))
         print(f"{self.tube_time_indices=}, {self.tube_pos_indices=}, {self.num_save=}")
-        exit(0)
+        # exit(0)
 
 
 
