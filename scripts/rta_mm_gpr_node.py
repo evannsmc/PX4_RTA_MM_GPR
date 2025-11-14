@@ -76,9 +76,14 @@ class OffboardControl(Node):
         self.wz_log = LogType("wz", 16)
 
         self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
+
+        self.tube_start = 3
         self.tube_extent = 26
         self.tube_skip = 4
-        self.tube_time_indices = slice(0, self.tube_extent, self.tube_skip)
+
+        tube_start = self.tube_start
+        tube_end = self.tube_start + self.tube_extent
+        self.tube_time_indices = slice(tube_start, tube_end, self.tube_skip)
 
         # self.num_save = len(range(*self.tube_time_indices.indices(26)))
         # print(f"{self.tube_time_indices=}, {self.tube_pos_indices=}, {self.num_save=}")
@@ -733,7 +738,10 @@ class OffboardControl(Node):
         print(f"{self.traj_idx=}")
 
 
-        row_indices = slice(self.traj_idx, self.traj_idx + self.tube_extent, self.tube_skip)
+        ref_save_start = self.traj_idx + self.tube_start
+        ref_save_end = ref_save_start + self.tube_extent
+        row_indices = slice(ref_save_start, ref_save_end, self.tube_skip)
+
         self.y_ref = self.rollout_ref[row_indices, 0]
         self.z_ref = self.rollout_ref[row_indices, 1]
         self.yaw_ref = self.rollout_ref[row_indices, 4]
