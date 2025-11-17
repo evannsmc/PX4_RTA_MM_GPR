@@ -135,7 +135,7 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         return jnp.sqrt(GP.variance(jnp.hstack((t, x[1]))).reshape(-1))
 
     def sigma_bruteforce_if(t, ix):
-        div = 100
+        div = div1
         x_list = [ix.lower + ((ix.upper - ix.lower)/div)*i for i in range(div)]
         sigma_list = 3.0*jnp.array([sigma(t, x) for x in x_list]) # # TODO: get someone to explain: why 3.0?
         return irx.interval(jnp.array([jnp.min(sigma_list)]), jnp.array([jnp.max(sigma_list)]))
@@ -156,7 +156,7 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         # GP Interval Work
         GP_mean_t = GP.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
         xint = irx.ut2i(xt_emb) # buffer sampled sigma bound with lipschitz constant to recover guarantee
-        x_div = (xint.upper - xint.lower)/(100*2) # x_div is 
+        x_div = (xint.upper - xint.lower)/(div2*2) # x_div is 
         sigma_lip = MS @ x_div.T # Lipschitz constant for sigma function above
         w_diff = sigma_bruteforce_if(t, irx.ut2i(xt_emb)) # TODO: Explain
         w_diffint = irx.icentpert(0.0, w_diff.upper + sigma_lip.upper[1]) # TODO: Explain
@@ -191,6 +191,8 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         return ((xt_emb_p1, xt_ref_p1, MS), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
     
 
+    div1 = 100
+    div2 = 100
 
     GP = TVGPR(obs, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance
     tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
