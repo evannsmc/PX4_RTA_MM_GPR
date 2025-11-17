@@ -91,7 +91,7 @@ class PlanarMultirotorTransformed(irx.System) :
         ydot = h*jnp.cos(theta) - v*jnp.sin(theta) # ydot = h*cos(theta) - v*sin(theta)
         zdot = h*jnp.sin(theta) + v*jnp.cos(theta) # zdot = h*sin(theta) + v*cos(theta)
 
-        # depending on the distubrance direction in the sim we may need to flip the sign on the wz term
+        # depending on the distubrance direction in the sim we may need to flip the sign on the wz terms
         hdot = G*jnp.sin(theta) + (w_y/M)*jnp.cos(theta) + (w_z/M)*jnp.sin(theta) # hdot = G*sin(theta) + (wy/M)*cos(theta) + (wz/M)*sin(theta)
         vdot = G*jnp.cos(theta) - (w_y/M)*jnp.sin(theta) + (w_z/M)*jnp.cos(theta) - (u1/M)
 
