@@ -134,7 +134,7 @@ class OffboardControl(Node):
             self.get_throttle_command_from_force = hardware_utilities.get_throttle_command_from_force
 
         self.wind_ekf = WindEKF(mass=self.MASS)
-        self.USE_EKF = True
+        self.USE_EKF = False
 
 
         # Logging related variables
@@ -514,7 +514,7 @@ class OffboardControl(Node):
         wind_estimate_time = time.time() - self.T0
 
         
-        TESTING_NO_WIND_ESTIMATION = True
+        TESTING_NO_WIND_ESTIMATION = False
         if TESTING_NO_WIND_ESTIMATION:
             self.wy, self.wz = 0., 0.
             gz_windforce_in_y, gy_windforce_in_z = 0., 0.
