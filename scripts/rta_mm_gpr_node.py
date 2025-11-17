@@ -514,7 +514,7 @@ class OffboardControl(Node):
         wind_estimate_time = time.time() - self.T0
 
         
-        NO_WIND_ESTIMATION = False
+        NO_WIND_ESTIMATION = True
         if NO_WIND_ESTIMATION:
             self.wy, self.wz = 0., 0.
             gz_windforce_in_y, gy_windforce_in_z = 0., 0.
@@ -810,10 +810,10 @@ class OffboardControl(Node):
 
         print("==" * 30)
 
-    def update_lqr_feedback(self, sys, state, input, noise):
+    def update_lqr_feedback(self, sys, state, input, noise_y, noise_z):
             print(f"{BANNER}UPDATING LQR")
             t0 = time.time()
-            A, B = jitted_linearize_system(sys, state, input, noise, noise)  # Linearize the system dynamics
+            A, B = jitted_linearize_system(sys, state, input, noise_y, noise_z)  # Linearize the system dynamics
             K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             self.feedback_K = 1 * K
 
@@ -842,9 +842,15 @@ class OffboardControl(Node):
         current_state = self.rta_mm_gpr_state_vector_planar # Get the current state vector
 
         # Re-linearize and re-compute the LQR gain every X seconds or when the yaw exceeds the maximum stray
-        if (self.time_from_start - self.last_lqr_update_time) >= 2.5 or abs(self.yaw) > self.max_yaw_stray:  
+        if (self.time_from_start - self.last_lqr_update_time) >= 1.8 or abs(self.yaw) > self.max_yaw_stray:  
+            
+            # wind_force_y = jnp.array([self.wy])
+            # wind_force_z = jnp.array([self.wz])
+
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            self.update_lqr_feedback(self.quad_sys_planar, state, input, noise)
+            wind_force_y = noise
+            wind_force_z = noise
+            self.update_lqr_feedback(self.quad_sys_planar, state, input, wind_force_y, wind_force_z)
 
         # Re-compute LQR input
         applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K, self.ulim_planar)
