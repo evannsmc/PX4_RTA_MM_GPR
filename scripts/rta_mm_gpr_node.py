@@ -513,43 +513,49 @@ class OffboardControl(Node):
         
         wind_estimate_time = time.time() - self.T0
 
+        
+        TESTING_NO_WIND_ESTIMATION = True
+        if TESTING_NO_WIND_ESTIMATION:
+            self.wy, self.wz = 0., 0.
+            gz_windforce_in_y, gy_windforce_in_z = 0., 0.
 
-        if not self.USE_EKF:
-            # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
-            _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
-            print(f"{ay_hat = }, {az_hat = }")
-            print(f"{self.ay}, {self.az}")
-            tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
-
-
-            # Estimate wind disturbance force in y-direction
-            ay_wind = (self.ay - ay_hat) 
-            gz_windforce_in_y = self.MASS * ay_wind
-            self.wy = gz_windforce_in_y
-
-
-            # Estimate wind disturbance force in z-direction
-            az_wind = (self.az - az_hat)
-            gy_windforce_in_z = self.MASS * az_wind
-            self.wz = gy_windforce_in_z
         else:
-            # Predict step
-            self.wind_ekf.predict()
+            if not self.USE_EKF:
+                # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
+                _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
+                print(f"{ay_hat = }, {az_hat = }")
+                print(f"{self.ay}, {self.az}")
+                tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
 
-            # Your existing model prediction:
-            _, ay_hat, az_hat = self.OBS_DYN @ dynamics(self.nr_state_vector,
-                                                        self.last_input,
-                                                        self.MASS)
 
-            # Update step with measurements
-            self.wy, self.wz = self.wind_ekf.update(
-                ay_meas=self.ay,
-                az_meas=self.az,
-                ay_model=ay_hat,
-                az_model=az_hat,
-            )
-            gz_windforce_in_y = self.wy
-            gy_windforce_in_z = self.wz
+                # Estimate wind disturbance force in y-direction
+                ay_wind = (self.ay - ay_hat) 
+                gz_windforce_in_y = self.MASS * ay_wind
+                self.wy = gz_windforce_in_y
+
+
+                # Estimate wind disturbance force in z-direction
+                az_wind = (self.az - az_hat)
+                gy_windforce_in_z = self.MASS * az_wind
+                self.wz = gy_windforce_in_z
+            else:
+                # Predict step
+                self.wind_ekf.predict()
+
+                # Your existing model prediction:
+                _, ay_hat, az_hat = self.OBS_DYN @ dynamics(self.nr_state_vector,
+                                                            self.last_input,
+                                                            self.MASS)
+
+                # Update step with measurements
+                self.wy, self.wz = self.wind_ekf.update(
+                    ay_meas=self.ay,
+                    az_meas=self.az,
+                    ay_model=ay_hat,
+                    az_model=az_hat,
+                )
+                gz_windforce_in_y = self.wy
+                gy_windforce_in_z = self.wz
 
 
 
