@@ -514,7 +514,7 @@ class OffboardControl(Node):
         wind_estimate_time = time.time() - self.T0
 
         
-        TESTING_NO_WIND_ESTIMATION = False
+        TESTING_NO_WIND_ESTIMATION = True
         if TESTING_NO_WIND_ESTIMATION:
             self.wy, self.wz = 0., 0.
             gz_windforce_in_y, gy_windforce_in_z = 0., 0.
