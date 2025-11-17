@@ -635,6 +635,8 @@ class OffboardControl(Node):
 
                     self.traj_idx = 0
 
+                    self.tube_start = self.rollout_comptime // self.control_period + 1 
+                    self.tube_time_indices = slice(self.tube_start, self.tube_start + self.tube_extent, self.tube_skip)
                     self.save_tube = self.reachable_tube[self.tube_time_indices, self.tube_pos_indices] # maybe mess with this
                     # exit(0)
 
