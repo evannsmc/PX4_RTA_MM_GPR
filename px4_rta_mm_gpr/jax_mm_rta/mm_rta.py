@@ -79,19 +79,31 @@ class PlanarMultirotorTransformed(irx.System) :
         self.G = GRAVITY # gravitational acceleration in m/s^2
         self.M = mass # mass of the multirotor in kg
 
-    def f(self, t, x, u, w): #jax version of Eq.30 in "Trajectory Tracking Runtime Assurance for Systems with Partially Unknown Dynamics"
-        py, pz, h, v, theta = x
-        u1, u2 = u
-        wz = w # horizontal wind disturbance as a function of height
-        G = self.G
-        M = self.M
+    def f(self, t, x, u, w_y, w_z): #jax version of Eq.30 in "Trajectory Tracking Runtime Assurance for Systems with Partially Unknown Dynamics"
+        px, py, h, v, theta = x.ravel()
+        u1, u2 = u.ravel()
+        w_y = w_y[0]
+        w_z = w_z[0]
 
-        return jnp.hstack([
-            h*jnp.cos(theta) - v*jnp.sin(theta), #py_dot = hcos(theta) - vsin(theta)
-            h*jnp.sin(theta) + v*jnp.cos(theta), #pz_dot = hsin(theta) + vcos(theta)
-            (wz/M) * jnp.cos(theta) + G*jnp.sin(theta), #hdot = (wz/m)*cos(theta) + G*sin(theta)
-            -(u1/M) * jnp.cos(theta) + G*jnp.cos(theta) - (wz/M) * jnp.sin(theta), #vdot = -(u1/m)*cos(theta) + G*cos(theta) - (wz/m)*sin(theta)
-            u2
+        G = self.G # gravitational acceleration
+        M = self.M # mass of the vehicle
+
+        ydot = h*jnp.cos(theta) - v*jnp.sin(theta) # ydot = h*cos(theta) - v*sin(theta)
+        zdot = h*jnp.sin(theta) + v*jnp.cos(theta) # zdot = h*sin(theta) + v*cos(theta)
+
+        # depending on the distubrance direction in the sim we may need to flip the sign on the wz term
+        hdot = G*jnp.sin(theta) + (w_y/M)*jnp.cos(theta) + (w_z/M)*jnp.sin(theta) # hdot = G*sin(theta) + (wy/M)*cos(theta) + (wz/M)*sin(theta)
+        vdot = G*jnp.cos(theta) - (w_y/M)*jnp.sin(theta) + (w_z/M)*jnp.cos(theta) - (u1/M)
+
+        theta_dot = u2 # thetadot = u2
+
+
+        return jnp.array([
+            ydot,
+            zdot,
+            hdot,
+            vdot,
+            theta_dot
         ])
     
 
@@ -127,21 +139,42 @@ def collection_id_jax(xref, xemb, threshold=0.3):
 
 ## JIT: Rollout function
 @partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -0.6, 0., 0., 0.])):
-    def mean_disturbance (t, x) :
-            return GP.mean(jnp.hstack((t, x[1]))).reshape(-1)    
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -0.6, 0., 0., 0.])):
+    def mean_disturbance_wy(t, x) :
+            return GPY.mean(jnp.hstack((t, x[1]))).reshape(-1)
 
-    def sigma(t, x):
-        return jnp.sqrt(GP.variance(jnp.hstack((t, x[1]))).reshape(-1))
+    def mean_disturbance_wz(t, x) :
+            return GPZ.mean(jnp.hstack((t, x[1]))).reshape(-1)
 
-    def sigma_bruteforce_if(t, ix):
-        div = div1
-        x_list = [ix.lower + ((ix.upper - ix.lower)/div)*i for i in range(div)]
-        sigma_list = 3.0*jnp.array([sigma(t, x) for x in x_list]) # # TODO: get someone to explain: why 3.0?
-        return irx.interval(jnp.array([jnp.min(sigma_list)]), jnp.array([jnp.max(sigma_list)]))
-        
+    def sigma_wy(t, x):
+        return jnp.sqrt(GPY.variance(jnp.hstack((t, x[1]))).reshape(-1))
+
+    def sigma_wz(t, x):
+        return jnp.sqrt(GPZ.variance(jnp.hstack((t, x[1]))).reshape(-1))
+
+    def sigma_bruteforce_both(t, ix):
+        """Vectorized computation of sigma bounds for both Y and Z wind directions.
+
+        Computes min/max of 3*sigma across the interval ix for both wind GPs.
+        Optimized to share discretization and use vectorized operations.
+        """
+        i_vals = jnp.arange(div1)
+        x_array = ix.lower + ((ix.upper - ix.lower)/div2) * i_vals[:, None]
+
+        # Vectorized computation using vmap instead of list comprehension
+        sigma_wy_vals = jax.vmap(lambda x: sigma_wy(t, x))(x_array)
+        sigma_wz_vals = jax.vmap(lambda x: sigma_wz(t, x))(x_array)
+
+        sigma_wy_scaled = 3.0 * sigma_wy_vals  # 3.0 for 3-sigma bounds
+        sigma_wz_scaled = 3.0 * sigma_wz_vals
+
+        w_diff_Y = irx.interval(jnp.array([jnp.min(sigma_wy_scaled)]), jnp.array([jnp.max(sigma_wy_scaled)]))
+        w_diff_Z = irx.interval(jnp.array([jnp.min(sigma_wz_scaled)]), jnp.array([jnp.max(sigma_wz_scaled)]))
+
+        return w_diff_Y, w_diff_Z
+
     def step (carry, t) :
-        xt_emb, xt_ref, MS = carry
+        xt_emb, xt_ref, MSY, MSZ = carry
         #(py,pz,h,v,theta)
         xt_des = x_des # jnp.array([0., -1.7, 0., 0., 0.]) # desired final state
         error = xt_ref - xt_des  # Compute the error between the current rollout reference state and the desired state
@@ -153,63 +186,80 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs, T, dt, perm, sys_mj
         # jax.debug.print("xt_ref: {xt}, u_reference: {ur}, u_ref_clipped: {uc}", xt=xt_ref, ur=u_reference, uc=u_ref_clipped)
 
 
-        # GP Interval Work
-        GP_mean_t = GP.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
-        xint = irx.ut2i(xt_emb) # buffer sampled sigma bound with lipschitz constant to recover guarantee
-        x_div = (xint.upper - xint.lower)/(div2*2) # x_div is 
-        sigma_lip = MS @ x_div.T # Lipschitz constant for sigma function above
-        w_diff = sigma_bruteforce_if(t, irx.ut2i(xt_emb)) # TODO: Explain
-        w_diffint = irx.icentpert(0.0, w_diff.upper + sigma_lip.upper[1]) # TODO: Explain
-        wint = irx.interval(GP_mean_t) + w_diffint # type: ignore
+        ### Wind GP Interval Work (Y and Z directions computed together for efficiency)
+        GP_mean_t_Y = GPY.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
+        GP_mean_t_Z = GPZ.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
 
-        
+        xint = irx.ut2i(xt_emb) # buffer sampled sigma bound with lipschitz constant to recover guarantee
+        x_div = (xint.upper - xint.lower)/(100*2) # x_div is
+        sigma_lip_Y = MSY @ x_div.T # Lipschitz constant for sigma function above
+        sigma_lip_Z = MSZ @ x_div.T # Lipschitz constant for sigma function above
+
+        # Compute sigma bounds for both wind directions in one vectorized call
+        w_diff_Y, w_diff_Z = sigma_bruteforce_both(t, irx.ut2i(xt_emb))
+
+        w_diffint_Y = irx.icentpert(0.0, w_diff_Y.upper + sigma_lip_Y.upper[1]) # TODO: Explain
+        w_diffint_Z = irx.icentpert(0.0, w_diff_Z.upper + sigma_lip_Z.upper[1]) # TODO: Explain
+        wint_Y = irx.interval(GP_mean_t_Y) + w_diffint_Y # type: ignore
+        wint_Z = irx.interval(GP_mean_t_Z) + w_diffint_Z # type: ignore
+
+
         # Compute the mixed Jacobian inclusion matrix for the system dynamics function and the disturbance function
-        Mt, Mx, Mu, Mw = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint,
-                                    centers=((jnp.array([t]), xt_ref, u_ref_clipped, GP_mean_t),), 
+        Mt, Mx, Mu, MwY, MwZ = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint_Y, wint_Z,
+                                    centers=((jnp.array([t]), xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z),),
                                     permutations=(perm,))[0]
-        
-        _, MG = G_mjacM(irx.interval(jnp.array([t])), irx.ut2i(xt_emb), 
-                        centers=((jnp.array([t]), xt_ref,),), 
+
+        _, MGY = G_mjacM_Y(irx.interval(jnp.array([t])), irx.ut2i(xt_emb),
+                        centers=((jnp.array([t]), xt_ref,),),
                         permutations=(G_perm,))[0]
+
+        _, MGZ = G_mjacM_Z(irx.interval(jnp.array([t])), irx.ut2i(xt_emb),
+                        centers=((jnp.array([t]), xt_ref,),),
+                        permutations=(G_perm,))[0]
+
         Mt = irx.interval(Mt)
         Mx = irx.interval(Mx)
         Mu = irx.interval(Mu)
-        Mw = irx.interval(Mw)
+        MwY = irx.interval(MwY)
+        MwZ = irx.interval(MwZ)
 
-        
+
 
         # Embedding system for reachable tube overapproximation due to state/input/disturbance uncertainty around the quad_sys_planar.f reference system under K_ref
-        F = lambda t, x, u, w: (Mx + Mu@K_feed + Mw@MG)@(x - xt_ref) + Mw@w_diffint + quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t) # with GP Jac
+        F = lambda t, x, u, wy, wz: (Mx + Mu@K_feed + MwY@MGY + MwZ@MGZ)@(x - xt_ref) + MwY@w_diffint_Y + MwZ@w_diffint_Z + quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z) # with GP Jac
         embsys = irx.ifemb(quad_sys, F)
-        xt_emb_p1 = xt_emb + dt*embsys.E(irx.interval(jnp.array([t])), xt_emb, u_ref_clipped, wint)
+        xt_emb_p1 = xt_emb + dt*embsys.E(irx.interval(jnp.array([t])), xt_emb, u_ref_clipped, wint_Y, wint_Z)
 
         # Move the reference forward in time as well
         # jax.debug.print("GPmean: {GP_mean}", GP_mean=GP_mean_t)
-        xt_ref_p1 = xt_ref + dt*quad_sys.f(t, xt_ref, u_ref_clipped, GP_mean_t)
+        xt_ref_p1 = xt_ref + dt*quad_sys.f(t, xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z)
 
-        
-        return ((xt_emb_p1, xt_ref_p1, MS), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
-    
+
+        return ((xt_emb_p1, xt_ref_p1, MSY, MSZ), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
 
     div1 = 100
     div2 = 100
 
-    GP = TVGPR(obs, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance
-    tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
-    MS0 = jax.jacfwd(sigma, argnums=(1,))(t_init, xc)[0] #TODO: Explain
 
-    G_mjacM = irx.mjacM(mean_disturbance) # TODO: Explain
+    GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Y
+    GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Z
+    tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
+    MS0Y = jax.jacfwd(sigma_wy, argnums=(1,))(t_init, xc)[0] #TODO: Explain
+    MS0Z = jax.jacfwd(sigma_wz, argnums=(1,))(t_init, xc)[0] #TODO: Explain
+
+    G_mjacM_Y = irx.mjacM(mean_disturbance_wy) # TODO: Explain
+    G_mjacM_Z = irx.mjacM(mean_disturbance_wz) # TODO: Explain
     G_perm = irx.Permutation((0, 1, 2, 4, 5, 3))
 
-    _, xx = jax.lax.scan(step, (irx.i2ut(ix), xc, irx.interval(MS0)), tt) #TODO: change variable names to be more descriptive
+    _, xx = jax.lax.scan(step, (irx.i2ut(ix), xc, irx.interval(MS0Y), irx.interval(MS0Z)), tt) #TODO: change variable names to be more descriptive
     return jnp.vstack((irx.i2ut(ix), xx[0])), jnp.vstack((xc, xx[1])), jnp.vstack(xx[2]) #TODO: change variable names to be more descriptive
 
 
 ## JAX Linearization Function
 @partial(jit, static_argnums=0)
-def jitted_linearize_system(sys, x0, u0, w0):
+def jitted_linearize_system(sys, x0, u0, w0y, w0z):
     """Compute the Jacobian of the system dynamics function with respect to state and input at the initial conditions."""
-    A, B = jax.jacfwd(sys.f, argnums=(1, 2))(0, x0, u0, w0) # Compute the Jacobian of the system dynamics function with respect to state and input at the initial conditions
+    A, B = jax.jacfwd(sys.f, argnums=(1, 2))(0, x0, u0, w0y, w0z) # Compute the Jacobian of the system dynamics function with respect to state and input at the initial conditions
     return A, B
 
 # ## 3D Case

@@ -303,7 +303,7 @@ class OffboardControl(Node):
 
         @time_fns
         def jit_compile_linearize_system():
-            A, B = jitted_linearize_system(self.quad_sys_planar, x0, u0, w0)
+            A, B = jitted_linearize_system(self.quad_sys_planar, x0, u0, w0, w0)
             return A, B
         
 
@@ -315,7 +315,7 @@ class OffboardControl(Node):
     
         @time_fns
         def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
             reachable_tube.block_until_ready()
             rollout_ref.block_until_ready()
             rollout_feedfwd_input.block_until_ready()
@@ -405,7 +405,7 @@ class OffboardControl(Node):
         self.tube_timestep = 0.01  # Time step
         self.tube_horizon = 30.0   # Reachable tube horizon
         self.sys_mjacM = irx.mjacM(self.quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
-        self.perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8)) # create a permutation for the inclusion system calculation
+        self.perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8, 9)) # create a permutation for the inclusion system calculation
 
 
 
@@ -477,7 +477,7 @@ class OffboardControl(Node):
         if self.first_LQR:
             t00 = time.time()
             noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            A, B = jitted_linearize_system(self.quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise)
+            A, B = jitted_linearize_system(self.quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise, noise)
             A, B = np.array(A), np.array(B)
             # print(f"Time to linearize system: {time.time() - t0} seconds")
 
@@ -578,7 +578,7 @@ class OffboardControl(Node):
         if self.wind_count % 50 == 0 and wind_estimate_time < self.begin_actuator_control:
             tr0 = time.time()
             print("Running rollout after wind update")
-            self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
 
             self.reachable_tube.block_until_ready()
             self.rollout_ref.block_until_ready()
@@ -609,7 +609,7 @@ class OffboardControl(Node):
 
                     tr0 = time.time()
 
-                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
 
                     self.reachable_tube.block_until_ready()
                     self.rollout_ref.block_until_ready()
@@ -813,7 +813,7 @@ class OffboardControl(Node):
     def update_lqr_feedback(self, sys, state, input, noise):
             print(f"{BANNER}UPDATING LQR")
             t0 = time.time()
-            A, B = jitted_linearize_system(sys, state, input, noise)  # Linearize the system dynamics
+            A, B = jitted_linearize_system(sys, state, input, noise, noise)  # Linearize the system dynamics
             K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             self.feedback_K = 1 * K
 
