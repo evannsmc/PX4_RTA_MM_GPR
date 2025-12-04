@@ -17,7 +17,7 @@ def get_flat_output_and_desired(df):
     angle_ref_col = 'psi_ref' if 'psi_ref' in df.columns else 'yaw_ref'
 
     actual_values = df[['x', 'y', 'z', angle_col]].to_numpy()
-    reference_values = df[['x_ref', 'y_ref', 'z_ref', angle_ref_col]].to_numpy()
+    reference_values = df[['y_ref', 'z_ref', angle_ref_col]].to_numpy()
 
     actual_values_clean = trim_trailing_all_nan(actual_values)
     reference_values_clean = trim_trailing_all_nan(reference_values)
