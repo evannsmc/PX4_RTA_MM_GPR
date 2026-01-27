@@ -140,17 +140,18 @@ def collection_id_jax(xref, xemb, threshold=0.3):
 ## JIT: Rollout function
 @partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
 def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -0.6, 0., 0., 0.])):
+    div = 100
     def mean_disturbance_wy(t, x) :
             return GPY.mean(jnp.hstack((t, x[1]))).reshape(-1)
 
     def mean_disturbance_wz(t, x) :
             return GPZ.mean(jnp.hstack((t, x[1]))).reshape(-1)
 
-    def sigma_wy(t, x):
-        return jnp.sqrt(GPY.variance(jnp.hstack((t, x[1]))).reshape(-1))
+    def sigma_wy_sq(t, x):
+        return GPY.variance(jnp.hstack((t, x[1]))).reshape(-1)
 
-    def sigma_wz(t, x):
-        return jnp.sqrt(GPZ.variance(jnp.hstack((t, x[1]))).reshape(-1))
+    def sigma_wz_sq(t, x):
+        return GPZ.variance(jnp.hstack((t, x[1]))).reshape(-1)
 
     def sigma_bruteforce_both(t, ix):
         """Vectorized computation of sigma bounds for both Y and Z wind directions.
@@ -158,51 +159,52 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
         Computes min/max of 3*sigma across the interval ix for both wind GPs.
         Optimized to share discretization and use vectorized operations.
         """
-        i_vals = jnp.arange(div1)
-        x_array = ix.lower + ((ix.upper - ix.lower)/div2) * i_vals[:, None]
-
+        x_array = ix.lower + ((ix.upper - ix.lower))*jnp.linspace(0., 1., div).reshape(-1, 1)
+        
         # Vectorized computation using vmap instead of list comprehension
-        sigma_wy_vals = jax.vmap(lambda x: sigma_wy(t, x))(x_array)
-        sigma_wz_vals = jax.vmap(lambda x: sigma_wz(t, x))(x_array)
+        sigma_wy_sq_vals = jax.vmap(lambda x: sigma_wy_sq(t, x))(x_array)
+        sigma_wz_sq_vals = jax.vmap(lambda x: sigma_wz_sq(t, x))(x_array)
 
-        sigma_wy_scaled = 3.0 * sigma_wy_vals  # 3.0 for 3-sigma bounds
-        sigma_wz_scaled = 3.0 * sigma_wz_vals
+        sigma_wy_sq_scaled = 9.0 * sigma_wy_sq_vals  # 3.0**2 for 3-sigma bounds
+        sigma_wz_sq_scaled = 9.0 * sigma_wz_sq_vals
 
-        w_diff_Y = irx.interval(jnp.array([jnp.min(sigma_wy_scaled)]), jnp.array([jnp.max(sigma_wy_scaled)]))
-        w_diff_Z = irx.interval(jnp.array([jnp.min(sigma_wz_scaled)]), jnp.array([jnp.max(sigma_wz_scaled)]))
+        w_diff_Y = irx.interval(jnp.array([jnp.min(sigma_wy_sq_scaled)]), jnp.array([jnp.max(sigma_wy_sq_scaled)]))
+        w_diff_Z = irx.interval(jnp.array([jnp.min(sigma_wz_sq_scaled)]), jnp.array([jnp.max(sigma_wz_sq_scaled)]))
 
         return w_diff_Y, w_diff_Z
 
     def step (carry, t) :
-        xt_emb, xt_ref, MSY, MSZ = carry
-        #(py,pz,h,v,theta)
-        xt_des = x_des # jnp.array([0., -1.7, 0., 0., 0.]) # desired final state
-        error = xt_ref - xt_des  # Compute the error between the current rollout reference state and the desired state
-        nominal = -K_reference @ error  # Compute the nominal input based on the reference state and feedback gain
+        xt_emb, xt_ref = carry #(py,pz,h,v,theta)
+
+        xt_des = x_des # desired final state
+        error = xt_ref - xt_des  # error between the current rollout reference state and the desired state
+        nominal = -K_reference @ error  # nominal input based on the reference state and feedback gain
+
         uG = nominal + jnp.array([MASS * GRAVITY, 0.0])  # Add the gravitational force to the nominal input
         u_ref_clipped = jnp.clip(uG, ulim.lower, ulim.upper)  # Clip the reference input to the input saturation limits
-
-
-        # jax.debug.print("xt_ref: {xt}, u_reference: {ur}, u_ref_clipped: {uc}", xt=xt_ref, ur=u_reference, uc=u_ref_clipped)
-
 
         ### Wind GP Interval Work (Y and Z directions computed together for efficiency)
         GP_mean_t_Y = GPY.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
         GP_mean_t_Z = GPZ.mean(jnp.array([t, xt_ref[1]])).reshape(-1) # get the mean of the disturbance at the current time and height
 
+        MSY = sigma_wy_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1]
+        MSZ = sigma_wz_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1]
+
         xint = irx.ut2i(xt_emb) # buffer sampled sigma bound with lipschitz constant to recover guarantee
-        x_div = (xint.upper - xint.lower)/(100*2) # x_div is
-        sigma_lip_Y = MSY @ x_div.T # Lipschitz constant for sigma function above
-        sigma_lip_Z = MSZ @ x_div.T # Lipschitz constant for sigma function above
+        x_div = (xint.upper - xint.lower)/(div*2) # x_div is
+        sigma_lip_Y = 9.0 * MSY.upper @ x_div.T # Lipschitz constant for sigma function above
+        sigma_lip_Z = 9.0 * MSZ.upper @ x_div.T # Lipschitz constant for sigma function above
 
         # Compute sigma bounds for both wind directions in one vectorized call
         w_diff_Y, w_diff_Z = sigma_bruteforce_both(t, irx.ut2i(xt_emb))
+        sig_upper_y = jnp.sqrt(w_diff_Y.upper + sigma_lip_Y[1])
+        sig_upper_z = jnp.sqrt(w_diff_Z.upper + sigma_lip_Z[1])
 
-        w_diffint_Y = irx.icentpert(0.0, w_diff_Y.upper + sigma_lip_Y.upper[1]) # TODO: Explain
-        w_diffint_Z = irx.icentpert(0.0, w_diff_Z.upper + sigma_lip_Z.upper[1]) # TODO: Explain
+        w_diffint_Y = irx.icentpert(0.0, sig_upper_y) # TODO: Explain
+        w_diffint_Z = irx.icentpert(0.0, sig_upper_z)
+
         wint_Y = irx.interval(GP_mean_t_Y) + w_diffint_Y # type: ignore
         wint_Z = irx.interval(GP_mean_t_Z) + w_diffint_Z # type: ignore
-
 
         # Compute the mixed Jacobian inclusion matrix for the system dynamics function and the disturbance function
         Mt, Mx, Mu, MwY, MwZ = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint_Y, wint_Z,
@@ -224,7 +226,6 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
         MwZ = irx.interval(MwZ)
 
 
-
         # Embedding system for reachable tube overapproximation due to state/input/disturbance uncertainty around the quad_sys_planar.f reference system under K_ref
         F = lambda t, x, u, wy, wz: (Mx + Mu@K_feed + MwY@MGY + MwZ@MGZ)@(x - xt_ref) + MwY@w_diffint_Y + MwZ@w_diffint_Z + quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z) # with GP Jac
         embsys = irx.ifemb(quad_sys, F)
@@ -235,24 +236,28 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
         xt_ref_p1 = xt_ref + dt*quad_sys.f(t, xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z)
 
 
-        return ((xt_emb_p1, xt_ref_p1, MSY, MSZ), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
+        return ((xt_emb_p1, xt_ref_p1), (xt_emb_p1, xt_ref_p1, u_ref_clipped))
 
-    div1 = 100
-    div2 = 100
 
+    tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
 
     GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Y
     GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Z
-    tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
-    MS0Y = jax.jacfwd(sigma_wy, argnums=(1,))(t_init, xc)[0] #TODO: Explain
-    MS0Z = jax.jacfwd(sigma_wz, argnums=(1,))(t_init, xc)[0] #TODO: Explain
+
+    sigma_wy_sq_jacM = irx.jacM(sigma_wy_sq)
+    sigma_wz_sq_jacM = irx.jacM(sigma_wz_sq)
 
     G_mjacM_Y = irx.mjacM(mean_disturbance_wy) # TODO: Explain
     G_mjacM_Z = irx.mjacM(mean_disturbance_wz) # TODO: Explain
     G_perm = irx.Permutation((0, 1, 2, 4, 5, 3))
 
-    _, xx = jax.lax.scan(step, (irx.i2ut(ix), xc, irx.interval(MS0Y), irx.interval(MS0Z)), tt) #TODO: change variable names to be more descriptive
-    return jnp.vstack((irx.i2ut(ix), xx[0])), jnp.vstack((xc, xx[1])), jnp.vstack(xx[2]) #TODO: change variable names to be more descriptive
+    final_carry, (embedding_sys_traj, reference_traj, control_traj) = jax.lax.scan(step, (irx.i2ut(ix), xc), tt) #TODO: change variable names to be more descriptive
+
+    # Return with initial conditions prepended
+    embedded_states_full = jnp.vstack((irx.i2ut(ix), embedding_sys_traj))
+    reference_states_full = jnp.vstack((xc, reference_traj))
+    control_inputs_full = jnp.vstack(control_traj)
+    return embedded_states_full, reference_states_full, control_inputs_full
 
 
 ## JAX Linearization Function

@@ -266,7 +266,7 @@ class OffboardControl(Node):
             self.max_y = 4.0
         else:
             self.max_height = -2.5
-            self.max_y = 0.75
+            self.max_y = -1.5
             # raise NotImplementedError("Hardware not implemented yet.")
 
     def init_jit_compile_nr_rta(self):
