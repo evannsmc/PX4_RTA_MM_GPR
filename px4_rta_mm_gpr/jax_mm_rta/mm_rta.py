@@ -190,11 +190,20 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
         MSY = sigma_wy_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1]
         MSZ = sigma_wz_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1]
 
+        # MSY = jax.jacfwd(sigma_wy_sq, argnums=(1,))(t, xt_ref)[0] #TODO: Explain
+        # MSZ = jax.jacfwd(sigma_wz_sq, argnums=(1,))(t, xt_ref)[0] #TODO: Explain
+
+        # MSY = sigma_wy_sq_jacM(irx.interval(t), irx.ut2i(xt_emb))[1].upper
+        # MSZ = sigma_wz_sq_jacM(irx.interval(t), irx.ut2i(xt_emb))[1].upper 
+
         xint = irx.ut2i(xt_emb) # buffer sampled sigma bound with lipschitz constant to recover guarantee
         x_div = (xint.upper - xint.lower)/(div*2) # x_div is
-        sigma_lip_Y = 9.0 * MSY.upper @ x_div.T # Lipschitz constant for sigma function above
-        sigma_lip_Z = 9.0 * MSZ.upper @ x_div.T # Lipschitz constant for sigma function above
-
+        # sigma_lip_Y = 9.0 * MSY @ x_div.T # Lipschitz constant for sigma function above
+        # sigma_lip_Z = 9.0 * MSZ @ x_div.T # Lipschitz constant for sigma function above
+        sigma_lip_Y = 9.0 * MSY.upper @ x_div.T
+        sigma_lip_Z = 9.0 * MSZ.upper @ x_div.T
+        
+                
         # Compute sigma bounds for both wind directions in one vectorized call
         w_diff_Y, w_diff_Z = sigma_bruteforce_both(t, irx.ut2i(xt_emb))
         sig_upper_y = jnp.sqrt(w_diff_Y.upper + sigma_lip_Y[1])
@@ -243,6 +252,9 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
 
     GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Y
     GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Z
+
+    # sigma_wy_sq_mjacM = irx.mjacM(sigma_wy_sq)
+    # sigma_wz_sq_mjacM = irx.mjacM(sigma_wz_sq)
 
     sigma_wy_sq_jacM = irx.jacM(sigma_wy_sq)
     sigma_wz_sq_jacM = irx.jacM(sigma_wz_sq)

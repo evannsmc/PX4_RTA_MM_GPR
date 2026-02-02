@@ -34,7 +34,9 @@ class TVGPR():
     
     def variance(self, x_star : jax.Array):
         _, cov_f_star = self.fit(x_star)
-        return jnp.diag(cov_f_star)
+        # return jnp.diag(cov_f_star)
+        D = jnp.diag_indices(len(x_star))
+        return cov_f_star[D]
     
     def std_dev(self, x_star : jax.Array): 
         return jnp.sqrt(self.variance(x_star))
