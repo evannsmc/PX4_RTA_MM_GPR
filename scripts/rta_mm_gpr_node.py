@@ -6,9 +6,10 @@ from rclpy.qos import (QoSProfile,
 from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
-    VehicleStatus, FullState, #Import PX4 ROS2-API messages for receiving vehicle state information
+    VehicleStatus, #Import PX4 ROS2-API messages for receiving vehicle state information
     RcChannels
 )
+from mocap_msgs.msg import FullState
 
 
 import time
@@ -265,8 +266,8 @@ class OffboardControl(Node):
             self.max_height = -12.5
             self.max_y = 4.0
         else:
-            self.max_height = -2.5
-            self.max_y = -1.5
+            self.max_height = -2.25
+            self.max_y = -2.0
             # raise NotImplementedError("Hardware not implemented yet.")
 
     def init_jit_compile_nr_rta(self):
