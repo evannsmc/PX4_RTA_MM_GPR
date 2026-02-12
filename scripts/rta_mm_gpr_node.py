@@ -210,7 +210,7 @@ class OffboardControl(Node):
         self.armed: bool = False
         self.in_land_mode: bool = False
         self.vehicle_status_subscriber = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
+            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_profile)
             
         self.offboard_mode_rc_switch_on: bool = True if self.sim else False   # RC switch related variables and subscriber
         print(f"RC switch mode: {'On' if self.offboard_mode_rc_switch_on else 'Off'}")
@@ -266,8 +266,8 @@ class OffboardControl(Node):
             self.max_height = -12.5
             self.max_y = 4.0
         else:
-            self.max_height = -2.25
-            self.max_y = -2.0
+            self.max_height = -3.75
+            self.max_y = -2.5
             # raise NotImplementedError("Hardware not implemented yet.")
 
     def init_jit_compile_nr_rta(self):
@@ -390,15 +390,15 @@ class OffboardControl(Node):
         self.gy_wind_obs_in_z = obs   # for example, 500 rows of 3-D data for wind observations in z-direction at various time and & y-heights
 
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
-        self.ulim_planar = irx.interval([0, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
-        self.Q_planar = jnp.array([10, 5, 1, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
-        self.R_planar = jnp.array([1, 1]) * jnp.eye(2)
+        self.ulim_planar = irx.interval([13, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
+        self.Q_planar = jnp.array([20, 5, 10, 1, 1]) * jnp.eye(self.quad_sys_planar.xlen) # weights that prioritize overall tracking of the reference (defined below)
+        self.R_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
         #(py,pz,h,v,theta)
         # self.Q_ref_planar = jnp.array([50, 50, 200, 200, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
 
-        self.Q_ref_planar =jnp.array([50, 20, 50, 20, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        self.Q_ref_planar =jnp.array([40, 5, 40, 5, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
         self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
@@ -515,7 +515,7 @@ class OffboardControl(Node):
         wind_estimate_time = time.time() - self.T0
 
         
-        NO_WIND_ESTIMATION = True
+        NO_WIND_ESTIMATION = False
         if NO_WIND_ESTIMATION:
             self.wy, self.wz = 0., 0.
             gz_windforce_in_y, gy_windforce_in_z = 0., 0.

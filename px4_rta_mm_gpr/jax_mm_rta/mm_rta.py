@@ -139,8 +139,8 @@ def collection_id_jax(xref, xemb, threshold=0.3):
 
 ## JIT: Rollout function
 @partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -0.6, 0., 0., 0.])):
-    div = 100
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.])):
+    div = 50
     def mean_disturbance_wy(t, x) :
             return GPY.mean(jnp.hstack((t, x[1]))).reshape(-1)
 
