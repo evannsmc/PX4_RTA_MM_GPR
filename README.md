@@ -1,5 +1,10 @@
 ### Runtime Assurance with Mixed Monotonicity for Partialy Unkown Systems with Gaussian Proccess Regressions for PX4 Quadrotor Hardware Deployment
 
+See videos [here](https://gtvault-my.sharepoint.com/:f:/g/personal/egm9_gatech_edu/IgCTC42sLm-LSrAf6xMkPS_UAev1dNpcvioJ8PtQfRRZTEs?e=mRaYgF)
+
+
+See data analysis for hardware experiments in `/px4_rta_mm_gpr/scripts/data_analysis/log_files/hardware/`
+
 1. How to run:
 
 ```bash
