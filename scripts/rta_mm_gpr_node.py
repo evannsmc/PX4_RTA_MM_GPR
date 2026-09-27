@@ -1,4 +1,5 @@
 from rclpy.node import Node # Import Node class from rclpy to create a ROS2 node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup # Callback groups decide which callbacks may run concurrently
 from rclpy.qos import (QoSProfile,
                        ReliabilityPolicy,
                        HistoryPolicy,
@@ -12,11 +13,15 @@ from px4_msgs.msg import(
 from mocap_msgs.msg import FullState
 
 
+import gc
+import os
 import time
+import threading
 import control
 import numpy as np
 import inspect
 import traceback
+from dataclasses import dataclass
 from typing import Optional
 from scipy.spatial.transform import Rotation as R
 
@@ -25,6 +30,9 @@ from px4_rta_mm_gpr.jax_mm_rta import *
 from px4_rta_mm_gpr.px4_functions import *
 from px4_rta_mm_gpr.jax_nr import NR_tracker_original, dynamics
 from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
+from px4_rta_mm_gpr.concurrency import (
+    RolloutPlan, LoopStats, RolloutConfig, RolloutRequest, RolloutResult,
+    ThreadRolloutBackend, ProcessRolloutBackend)
 
 import immrax as irx
 import jax.numpy as jnp
@@ -34,6 +42,41 @@ except ImportError:
     from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
 BANNER = '\n' + "==" * 30 + '\n'
+
+
+@dataclass(frozen=True)
+class RuntimeOptions:
+    """How the node is scheduled. Set from the command line in scripts/px4_rta_mm_gpr.py."""
+    executor: str = 'multi'              # 'multi' | 'single' | 'events'
+    rollout_backend: str = 'thread'      # 'thread' | 'process'
+    rollout_cpus: Optional[frozenset] = None  # CPU affinity for the rollout worker process
+    gp_learn: bool = True                # feed wind estimates into the GP data buffers
+    tube_horizon: float = 30.0           # (s) rollout horizon; the scan is causal, so a shorter horizon gives the
+                                         # same plan whenever the safety violation happens inside it
+    gc_freeze: bool = True               # move everything allocated during init out of the GC's reach
+    gc_no_full: bool = True              # no automatic full (generation-2) collections during flight
+    verbose: bool = False                # per-callback debug printing (slow: ~100s of prints/s)
+
+
+@dataclass(frozen=True)
+class VehicleState:
+    """One odometry sample. Built completely, then published with a single assignment, so
+    readers in other threads never see a mix of two samples (e.g. new position, old velocity)."""
+    stamp: float
+    x: float
+    y: float
+    z: float
+    vx: float
+    vy: float
+    vz: float
+    ax: float
+    ay: float
+    az: float
+    roll: float
+    pitch: float
+    yaw: float
+    nr_state_vector: np.ndarray                 # (x, y, z, vx, vy, vz, roll, pitch, yaw)
+    rta_mm_gpr_state_vector_planar: np.ndarray  # (py, pz, h, v, theta)
 
 class WindEKF:
     def __init__(self, mass, Q=None, R=None):
@@ -119,12 +162,15 @@ class WindEKF:
         wy, wz = self.x.flatten()
         return wy, wz
 
+
 class OffboardControl(Node):
-    def __init__(self, sim: bool) -> None:
+    def __init__(self, sim: bool, options: RuntimeOptions = RuntimeOptions()) -> None:
         super().__init__('px4_rta_mm_gpr_node')
         # Initialize essential variables
         self.sim: bool = sim
+        self.options = options
         self.GRAVITY: float = 9.806 # m/s^2, gravitational acceleration
+        self.debug = print if options.verbose else (lambda *args, **kwargs: None) # hot-path printing is opt-in
 
         if self.sim:
             print("Using simulator constants and functions")
@@ -139,6 +185,7 @@ class OffboardControl(Node):
 
         self.wind_ekf = WindEKF(mass=self.MASS)
         self.USE_EKF = True
+        self.wy, self.wz = 0.0, 0.0 # latest wind force estimates (written by the wind thread)
 
 
         # Logging related variables
@@ -165,26 +212,35 @@ class OffboardControl(Node):
         self.wy_log = LogType("wy", 15)
         self.wz_log = LogType("wz", 16)
 
+        # Concurrency diagnostics (new): how old / how late the plan used by each control tick is
+        self.rollout_latency_log = LogType("rollout_latency", 17) # (s) rollout submit -> plan installed
+        self.plan_age_log = LogType("plan_age", 18)               # (s) now - plan.t_start at this control tick
+        self.plan_expired_log = LogType("plan_expired", 19)       # 1 if now > plan.collection_time at this tick
+
         self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
 
         self.tube_start = 9
         self.tube_extent = 23
         self.tube_skip = 2
 
-        tube_start = self.tube_start
-        tube_end = self.tube_start + self.tube_extent
-        self.tube_time_indices = slice(tube_start, tube_end, self.tube_skip)
-
-        # self.num_save = len(range(*self.tube_time_indices.indices(26)))
-        # print(f"{self.tube_time_indices=}, {self.tube_pos_indices=}, {self.num_save=}")
-        # exit(0)
-
-
 
         self.metadata = np.array(['Sim' if self.sim else 'Hardware',
+                                  f'executor={options.executor}',
+                                  f'rollout_backend={options.rollout_backend}',
+                                  f'gp_learn={options.gp_learn}',
                                 ])
 
 ##########################################################################################
+        # Callback groups: callbacks in the SAME mutually-exclusive group never run at the same time;
+        # callbacks in DIFFERENT groups may run in parallel on a MultiThreadedExecutor.
+        # (With a single-threaded executor the groups are harmless: everything is serialized anyway.)
+        self.px4_io_group = MutuallyExclusiveCallbackGroup()     # offboard heartbeat, vehicle status, RC
+        self.state_group = MutuallyExclusiveCallbackGroup()      # odometry
+        self.control_group = MutuallyExclusiveCallbackGroup()    # 100 Hz control law
+        self.rollout_group = MutuallyExclusiveCallbackGroup()    # reachable tube + reference rollouts
+        self.estimation_group = MutuallyExclusiveCallbackGroup() # wind EKF/GP data + LQR gain updates
+        self.num_callback_groups = 5
+
         # Configure QoS profile for publishing and subscribing
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -204,24 +260,26 @@ class OffboardControl(Node):
             VehicleRatesSetpoint, '/fmu/in/vehicle_rates_setpoint', qos_profile)
 
         # Create subscribers
-        # Create subscribers
+        self.state: Optional[VehicleState] = None # latest odometry sample (None until the first message)
         self.vehicle_odometry_subscriber = self.create_subscription(
-            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile)
-        
+            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile,
+            callback_group=self.state_group)
 
-        self.in_offboard_mode: bool = False       
+
+        self.in_offboard_mode: bool = False
         self.armed: bool = False
         self.in_land_mode: bool = False
         self.vehicle_status_subscriber = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_profile)
-            
+            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_profile,
+            callback_group=self.px4_io_group)
+
         self.offboard_mode_rc_switch_on: bool = True if self.sim else False   # RC switch related variables and subscriber
         print(f"RC switch mode: {'On' if self.offboard_mode_rc_switch_on else 'Off'}")
         self.MODE_CHANNEL: int = 5 # Channel for RC switch to control offboard mode (-1: position, 0: offboard, 1: land)
         self.rc_channels_subscriber = self.create_subscription( #subscribes to rc_channels topic for software "killswitch" for position v offboard v land mode
-            RcChannels, '/fmu/out/rc_channels', self.rc_channel_subscriber_callback, qos_profile
-        )
-        
+            RcChannels, '/fmu/out/rc_channels', self.rc_channel_subscriber_callback, qos_profile,
+            callback_group=self.px4_io_group)
+
         # MoCap related variables
         self.mocap_initialized: bool = False
         self.full_rotations: int = 0
@@ -230,39 +288,46 @@ class OffboardControl(Node):
         # PX4 variables
         self.offboard_heartbeat_counter: int = 0
         self.vehicle_status = VehicleStatus()
-        # self.takeoff_height = -5.0
 
         # Callback function time constants
         self.heartbeat_period: float = 0.1 # (s) We want 10Hz for offboard heartbeat signal
         self.control_period: float = 0.01 # (s) We want 100Hz for direct control algorithm
         self.wind_estimate_period: float = 0.1 # (s) We want 10Hz for wind estimation update
-        self.traj_idx = 0 # Index for trajectory setpoint
+        self.lqr_period: float = 0.05 # (s) how often the LQR re-linearization condition is checked
 
         self.OBS_DYN = jnp.array([
                                 [0, 0, 0, 1, 0, 0, 0, 0, 0],
                                 [0, 0, 0, 0, 1, 0, 0, 0, 0],
                                 [0, 0, 0, 0, 0, 1, 0, 0, 0]])
 
-        # Timers for my callback functions
-        self.offboard_timer = self.create_timer(self.heartbeat_period,
-                                                self.offboard_heartbeat_signal_callback) #Offboard 'heartbeat' signal should be sent at 10Hz
-        self.control_timer = self.create_timer(self.control_period,
-                                               self.control_algorithm_callback) #My control algorithm needs to execute at >= 100Hz
-        self.rollout_timer = self.create_timer(self.control_period,
-                                               self.rollout_callback) #My rollout function needs to execute at >= 100Hz
-        self.wind_estimator = self.create_timer(self.wind_estimate_period,
-                                                self.wind_estimator_callback)
+        # Timing diagnostics, printed at shutdown
+        self.loop_stats = {
+            'control': LoopStats('control', self.control_period),
+            'heartbeat': LoopStats('heartbeat', self.heartbeat_period),
+            'wind': LoopStats('wind', self.wind_estimate_period),
+        }
+        self.rollout_compute_times: list = []
+        self.rollout_latencies: list = []
+        self.gc_pauses = {0: [], 1: [], 2: []} # (s) stop-the-world garbage collection pauses per generation
+        self._gc_start = None
+        gc.callbacks.append(self._gc_callback)
+
+        # Shared state between threads. Each of these is only ever REPLACED (one reference
+        # assignment, atomic in CPython), never mutated in place.
+        self.plan: Optional[RolloutPlan] = None          # written by rollout thread, read by control
+        self.gains: Optional[tuple] = None               # (K_feedback, K_reference); written by estimation thread
+        self.plan_lock = threading.Lock()                # guards plan installation bookkeeping
+        self.plan_seq: int = 0
+        self.warmup_rollout_requested = threading.Event() # wind thread asks the rollout thread for a warm-up rollout
+        self.collection_time: float = 0.0  # Time at which the collection starts (rollout thread only)
 
         self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
-        self.T0 = time.time()  # Reset initial time after JIT compilation
 
         self.last_lqr_update_time: float = 0.0  # Initialize last LQR update time
         self.first_LQR: bool = True  # Flag to indicate if this is the first LQR update
-        self.collection_time: float = 0.0  # Time at which the collection starts
 
         # Time variables
-        self.T0 = time.time() # (s) initial time of program
-        self.time_from_start = time.time() - self.T0 # (s) time from start of program 
+        self.T0 = time.time() # (s) initial time of program (reset after JIT compilation)
         self.begin_actuator_control = 15 # (s) time after which we start sending actuator control commands
         self.land_time = self.begin_actuator_control + 20 # (s) time after which we start sending landing commands
         if self.sim:
@@ -271,7 +336,51 @@ class OffboardControl(Node):
         else:
             self.max_height = -3.75
             self.max_y = -2.5
-            # raise NotImplementedError("Hardware not implemented yet.")
+
+        if self.options.gc_freeze:
+            # Everything allocated so far (JAX/XLA caches, compiled functions, immrax objects, ROS entities)
+            # lives for the whole flight. gc.freeze() moves it to a permanent generation that the collector
+            # never scans again, so each full collection only walks objects created during flight.
+            gc.collect()
+            gc.freeze()
+            print(f"gc.freeze(): {gc.get_freeze_count()} objects excluded from garbage collection")
+        if self.options.gc_no_full:
+            # A full collection walks EVERY tracked object while holding the GIL (measured: ~300 ms, i.e. 30
+            # missed control ticks). Young generations are still collected (~1 ms); gen-2 garbage is left for
+            # the explicit gc.collect() at shutdown. For a flight of a few minutes the extra memory is small.
+            g0, g1, _ = gc.get_threshold()
+            gc.set_threshold(g0, g1, 1_000_000_000)
+
+        # Timers for my callback functions (created last so no callback runs before init finishes)
+        self.offboard_timer = self.create_timer(self.heartbeat_period,
+                                                self.offboard_heartbeat_signal_callback,
+                                                callback_group=self.px4_io_group) #Offboard 'heartbeat' signal should be sent at 10Hz
+        self.control_timer = self.create_timer(self.control_period,
+                                               self.control_algorithm_callback,
+                                               callback_group=self.control_group) #My control algorithm needs to execute at >= 100Hz
+        self.rollout_timer = self.create_timer(self.control_period,
+                                               self.rollout_callback,
+                                               callback_group=self.rollout_group) #Checks at 100Hz whether a new rollout is needed
+        self.wind_estimator = self.create_timer(self.wind_estimate_period,
+                                                self.wind_estimator_callback,
+                                                callback_group=self.estimation_group)
+        self.lqr_timer = self.create_timer(self.lqr_period,
+                                           self.lqr_update_callback,
+                                           callback_group=self.estimation_group)
+
+    def _gc_callback(self, phase, info):
+        # Runs in whichever thread triggered the collection, with the GIL held: every other Python thread
+        # (including the control loop) is frozen for this whole duration.
+        if phase == 'start':
+            self._gc_start = time.perf_counter()
+        elif self._gc_start is not None:
+            self.gc_pauses[info['generation']].append(time.perf_counter() - self._gc_start)
+            self._gc_start = None
+
+    def now(self) -> float:
+        """Seconds since the node's T0. Each callback computes its own time instead of sharing
+        one ``self.time_from_start`` attribute that several threads would race to overwrite."""
+        return time.time() - self.T0
 
     def init_jit_compile_nr_rta(self):
         """
@@ -300,7 +409,7 @@ class OffboardControl(Node):
 
                 return result2
             return wrapper
-        
+
         @time_fns
         def jit_compile_nr_tracker():
             NR_tracker_original(init_state, init_input, init_ref, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS) # JIT-compile the NR tracker function
@@ -309,34 +418,36 @@ class OffboardControl(Node):
         def jit_compile_linearize_system():
             A, B = jitted_linearize_system(self.quad_sys_planar, x0, u0, w0, w0)
             return A, B
-        
+
 
         @time_fns
         def jit_compile_lqr():
             K_reference, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)
             K_feedback, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
             return K_feedback, K_reference
-    
+
         @time_fns
-        def jit_compile_rollout():
-            reachable_tube, rollout_ref, rollout_feedfwd_input = jitted_rollout(jnp.array([0.]), ix0, x0, K_feedback, K_reference, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
-            reachable_tube.block_until_ready()
-            rollout_ref.block_until_ready()
-            rollout_feedfwd_input.block_until_ready()
-            return reachable_tube, rollout_ref, rollout_feedfwd_input
-        
-    
-        @time_fns
-        def jit_compile_collection_id():
-            violation_safety_time_idx = collection_id_jax(rollout_ref, reachable_tube)
-            return violation_safety_time_idx
- 
+        def jit_compile_control_path():
+            # Everything the first RTA control tick does with fresh argument types (numpy state, jnp.hstack, ...),
+            # otherwise the first tick at t=15 s pays ~0.5 s of op-by-op compilation.
+            nr_u, _ = NR_tracker_original(np.asarray(init_state), init_input, jnp.array([0.0, 0.0, np.float64(-3.0), 0.0]), self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
+            rta_u = u_applied(np.asarray(x0), np.asarray(x0), np.asarray(u0), np.asarray(K_feedback), self.ulim_planar)
+            new_u = jnp.hstack([rta_u, nr_u[2:]])
+            # Second tick onwards: last_input is the controller's own OUTPUT (a committed device array), which is
+            # a different jit cache key than the init-time array -> warm those variants too (measured: 322 ms stall).
+            nr_u, _ = NR_tracker_original(np.asarray(init_state), new_u, jnp.array([0.0, 0.0, np.float64(-3.0), 0.0]), self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
+            new_u = jnp.hstack([rta_u, nr_u[2:]])
+            self.OBS_DYN @ dynamics(np.asarray(init_state), new_u, self.MASS) # wind thread
+            jitted_linearize_system(self.quad_sys_planar, np.asarray(x0), new_u[0:2], w0, w0) # LQR thread
+            return np.asarray(new_u)
+
         @time_fns
         def jit_compile_u_applied():
-            applied_u = u_applied(x0, x0, u0, K_feedback, self.ulim_planar)
+            # numpy inputs, exactly like the control loop will pass them, so no re-trace happens in flight
+            applied_u = u_applied(np.asarray(x0), np.asarray(x0), np.asarray(u0), np.asarray(K_feedback), self.ulim_planar)
             return applied_u
-        
-        
+
+
         # Initialize NR algorithm parameters
         self.last_input: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.01, 0.01, 0.01]) # last input to the controller
         self.hover_input_planar: jnp.ndarray = jnp.array([self.MASS * self.GRAVITY, 0.]) # hover input to the controller
@@ -365,32 +476,29 @@ class OffboardControl(Node):
                                         [10, np.random.rand()],
                                         [12, np.random.rand()]]) # at heights of y in the first column, disturbance to the values in the second column
         # add a time dimension at t=0 to the GP instantiation values for TVGPR instantiation
-        initialization_GP = TVGPR(jnp.hstack((jnp.zeros((initialization_values_GP.shape[0], 1)), initialization_values_GP)), 
-                                            sigma_f = 5.0, 
-                                            l=2.0, 
+        initialization_GP = TVGPR(jnp.hstack((jnp.zeros((initialization_values_GP.shape[0], 1)), initialization_values_GP)),
+                                            sigma_f = 5.0,
+                                            l=2.0,
                                             sigma_n = 0.01,
                                             epsilon=0.1,
                                             discrete=False
                                             )
 
 
-        # x0 = jnp.array([-20, -10, 0.0, 10.0, 20.0])  # Initial state vector for testing
-        self.x_pert = 5e-4 * jnp.array([1., 1., 1., 1., 1.]) # 
-        ix0 = irx.icentpert(x0, self.x_pert)
+        self.x_pert = 5e-4 * jnp.array([1., 1., 1., 1., 1.]) #
         u0 = jnp.array(init_input[0:2])  # Initial input vector for testing
         w0 = jnp.array(init_noise)  # Initial noise vector for testing
-        print(f"{x0=}, {ix0=}, {ix0.shape=}")
 
 
         # Initialize rollout parameters
         self.n_obs = 9
-        obs = jnp.tile(jnp.array([[0, x0[1], get_gp_mean(initialization_GP, 0.0, x0)[0]]]),(self.n_obs,1))
+        obs = np.tile(np.array([[0, float(x0[1]), float(get_gp_mean(initialization_GP, 0.0, x0)[0])]]),(self.n_obs,1))
         self.obs = obs
-        # self.wind_obs_z0 = obs
 
         self.wind_count = 0
-        self.gz_wind_obs_in_y = obs   # for example, 500 rows of 3-D data for wind observations in y-direction at various time and & z-heights
-        self.gy_wind_obs_in_z = obs   # for example, 500 rows of 3-D data for wind observations in z-direction at various time and & y-heights
+        # GP data buffers: rows of (time, height, wind force). NumPy + copy-on-write (see wind callback).
+        self.gz_wind_obs_in_y = obs.copy()   # wind observations in y-direction at various times & z-heights
+        self.gy_wind_obs_in_z = obs.copy()   # wind observations in z-direction at various times & y-heights
 
         self.quad_sys_planar = PlanarMultirotorTransformed(mass=self.MASS)
         self.ulim_planar = irx.interval([13, -1],[21, 1]) # type: ignore # Input saturation interval -> -5 <= u1 <= 15, -5 <= u2 <= 5
@@ -399,274 +507,319 @@ class OffboardControl(Node):
 
 
         #(py,pz,h,v,theta)
-        # self.Q_ref_planar = jnp.array([50, 50, 200, 200, 1]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
-
         self.Q_ref_planar =jnp.array([40, 5, 40, 5, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
         self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
-        t0 = 0.0  # Initial time
         self.tube_timestep = 0.01  # Time step
-        self.tube_horizon = 30.0   # Reachable tube horizon
-        self.sys_mjacM = irx.mjacM(self.quad_sys_planar.f) # create a mixed Jacobian inclusion matrix for the system dynamics function
-        self.perm = irx.Permutation((0, 1, 2, 3, 4, 5, 6, 7, 8, 9)) # create a permutation for the inclusion system calculation
+        self.tube_horizon = self.options.tube_horizon   # Reachable tube horizon (default 30.0 s)
+        self.collection_threshold = 1.0 # tube/reference deviation (m) that ends the safety horizon
 
+        # Everything static about the rollout, as plain values (picklable for the worker process)
+        self.rollout_config = RolloutConfig(
+            mass=float(self.MASS), horizon=self.tube_horizon, timestep=self.tube_timestep,
+            ulim_lower=(13.0, -1.0), ulim_upper=(21.0, 1.0),
+            goal_state=tuple(float(v) for v in self.GOAL_STATE),
+            x_pert=tuple(float(v) for v in self.x_pert),
+            collection_threshold=self.collection_threshold)
 
+        # The process backend starts FIRST so the worker's (slow) rollout JIT compilation overlaps
+        # with the compilation of everything else in this process.
+        rollout_backend = None
+        if self.options.rollout_backend == 'process':
+            print("Starting rollout worker process (it JIT-compiles the rollout in parallel)...")
+            rollout_backend = ProcessRolloutBackend(self.rollout_config, self._warmup_request(x0),
+                                                    cpu_affinity=self.options.rollout_cpus)
 
         jit_compile_nr_tracker() # JIT-compile NR tracker
         A, B = jit_compile_linearize_system() # JIT-compile linearize system
         K_feedback, K_reference = jit_compile_lqr() # LQR JIT-compile
-        reachable_tube, rollout_ref, rollout_feedfwd_input = jit_compile_rollout() # JIT-compile rollout
-        violation_safety_time_idx = jit_compile_collection_id()
         applied_u = jit_compile_u_applied()
+        jit_compile_control_path()
+        jitted_linearize_system(self.quad_sys_planar, np.asarray(x0), self.last_input[0:2], w0, w0) # LQR-thread argument types
+
+        if rollout_backend is None:
+            rollout_backend = ThreadRolloutBackend(self.rollout_config)
+            request = self._warmup_request(x0, K_feedback, K_reference)
+            first = rollout_backend.warmup(request)
+            second = rollout_backend.warmup(request)
+            print(f"\nTime taken for rollout: {first}\nTime taken for rollout (JIT): {second}\n")
+        else:
+            warm = rollout_backend.wait_ready(timeout=600.0)
+            print(f"\nRollout worker ready (its JIT warm-up took {warm:.2f} s)\n")
+        self.rollout_backend = rollout_backend
 
         print(f"{A=},{B=}")
         print(f"{K_feedback=}\n{K_reference=}")
-        print(f"{reachable_tube[0:1, :]=}")
-        print(f"{rollout_ref=},{rollout_feedfwd_input=}")
-        print(f"{reachable_tube.shape = }, {rollout_ref.shape = }, {rollout_feedfwd_input.shape = }")
-        print(f"Collection ID: {violation_safety_time_idx}")
         print(f"Applied u: {applied_u}")
-        # exit(0)
+        print(f"Executor: {self.options.executor} | rollout backend: {self.rollout_backend.name} | "
+              f"GP learning: {self.options.gp_learn} | verbose: {self.options.verbose}")
 
         # Pause for 3 seconds to give myself time to read the print statements above
         print(f"\nPausing for 3 seconds to read the JIT compilation times above.\nContinuing...\n")
         time.sleep(3)
 
+    def _warmup_request(self, x0, K_feedback=None, K_reference=None) -> RolloutRequest:
+        """A representative request used only to trigger JIT compilation of the rollout."""
+        K_fb = np.zeros((2, 5)) if K_feedback is None else np.asarray(K_feedback)
+        K_ref = np.zeros((2, 5)) if K_reference is None else np.asarray(K_reference)
+        return RolloutRequest(t_start=0.0, state=np.asarray(x0), K_feedback=K_fb, K_reference=K_ref,
+                              obs_wy=self.gz_wind_obs_in_y, obs_wz=self.gy_wind_obs_in_z, warmup=True)
+
+    def close(self) -> None:
+        """Stop helper processes and print the timing summary. Called on shutdown."""
+        if self._gc_callback in gc.callbacks:
+            gc.callbacks.remove(self._gc_callback)
+        backend = getattr(self, 'rollout_backend', None)
+        if backend is not None:
+            backend.close()
+        print(self.timing_summary())
+        print(self.heap_summary())
+
+    def heap_summary(self, top: int = 6) -> str:
+        """Which object types the garbage collector has to scan (i.e. what makes full collections slow)."""
+        from collections import Counter
+        counts = Counter(type(o).__name__ for o in gc.get_objects())
+        return (f"gc-tracked objects: {sum(counts.values())} (+{gc.get_freeze_count()} frozen); top: "
+                + ', '.join(f"{name}={n}" for name, n in counts.most_common(top)))
+
+    def timing_summary(self) -> str:
+        lines = [f"{BANNER}Timing summary (executor={self.options.executor}, "
+                 f"rollout backend={self.options.rollout_backend})"]
+        lines += [s.summary() for s in self.loop_stats.values()]
+        for name, values in (('rollout compute', self.rollout_compute_times),
+                             ('rollout latency', self.rollout_latencies)):
+            v = np.asarray(values)
+            if v.size:
+                lines.append(f"{name:>16}: n={v.size}  mean={1e3 * v.mean():.1f} ms  "
+                             f"p50={1e3 * np.median(v):.1f} ms  max={1e3 * v.max():.1f} ms")
+        for gen, pauses in self.gc_pauses.items():
+            v = np.asarray(pauses)
+            if v.size:
+                lines.append(f"{'gc gen ' + str(gen):>16}: n={v.size}  total={v.sum():.3f} s  "
+                             f"p50={1e3 * np.median(v):.2f} ms  max={1e3 * v.max():.1f} ms")
+        return '\n'.join(lines) + BANNER
 
 
     def rc_channel_subscriber_callback(self, rc_channels):
         """Callback function for RC Channels to create a software 'killswitch' depending on our flight mode channel (position vs offboard vs land mode)"""
-        print(f"{BANNER}In RC Channel Callback")
+        self.debug(f"{BANNER}In RC Channel Callback")
         flight_mode = rc_channels.channels[self.MODE_CHANNEL-1] # +1 is offboard everything else is not offboard
         self.offboard_mode_rc_switch_on: bool = True if flight_mode >= 0.75 else False
 
     def vehicle_odometry_subscriber_callback(self, msg) -> None:
         """Callback function for vehicle odometry topic subscriber."""
-        print(f"{BANNER}Received odometry data: {msg=}")
+        self.debug(f"{BANNER}Received odometry data: {msg=}")
 
-        self.x = msg.position[0]
-        self.y = msg.position[1]
-        self.z = (msg.position[2] + 0.5) if (self.sim and (abs(msg.position[2]) < 1.2)) else msg.position[2]  # Adjust for sim ground level if needed
+        x = msg.position[0]
+        y = msg.position[1]
+        z = (msg.position[2] + 0.5) if (self.sim and (abs(msg.position[2]) < 1.2)) else msg.position[2]  # Adjust for sim ground level if needed
 
-        self.vx = msg.velocity[0]
-        self.vy = msg.velocity[1]
-        self.vz = msg.velocity[2]
+        vx, vy, vz = msg.velocity
+        ax, ay, az = msg.acceleration
 
-        self.ax = msg.acceleration[0]
-        self.ay = msg.acceleration[1]
-        self.az = msg.acceleration[2]
+        roll, pitch, yaw = R.from_quat(msg.q, scalar_first=True).as_euler('xyz', degrees=False)
+        yaw = adjust_yaw(self, yaw)  # Adjust yaw to account for full rotations
 
-        self.roll, self.pitch, yaw = R.from_quat(msg.q, scalar_first=True).as_euler('xyz', degrees=False)
-        self.yaw = adjust_yaw(self, yaw)  # Adjust yaw to account for full rotations
-        self.rotation_object = R.from_euler('xyz', [self.roll, self.pitch, self.yaw], degrees=False)         # Final rotation object
-        self.quat = self.rotation_object.as_quat()  # Quaternion representation (xyzw)
-
-        self.p = msg.angular_velocity[0]
-        self.q = msg.angular_velocity[1]
-        self.r = msg.angular_velocity[2]
-
-        self.full_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.ax, self.ay, self.az, self.roll, self.pitch, self.yaw, self.p, self.q, self.r])
-        self.nr_state_vector = np.array([self.x, self.y, self.z, self.vx, self.vy, self.vz, self.roll, self.pitch, self.yaw])
-        self.flat_state_vector = np.array([self.x, self.y, self.z, self.yaw, self.vx, self.vy, self.vz, 0., 0., 0., 0., 0.])
-        self.rta_mm_gpr_state_vector_planar = np.array([self.y, self.z, self.vy, self.vz, self.roll])# px, py, h, v, theta = x
-        self.output_vector = np.array([self.x, self.y, self.z, self.yaw])
-        self.position = np.array([self.x, self.y, self.z])
-        self.velocity = np.array([self.vx, self.vy, self.vz])
-        self.acceleration = np.array([self.ax, self.ay, self.az])
-        self.ROT = self.rotation_object.as_matrix()
-        self.omega = np.array([self.p, self.q, self.r])
-
-        print(f"in odom, flat output: {self.output_vector}")
-        if self.first_LQR:
-            t00 = time.time()
-            noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            A, B = jitted_linearize_system(self.quad_sys_planar, self.rta_mm_gpr_state_vector_planar, self.hover_input_planar, noise, noise)
-            A, B = np.array(A), np.array(B)
-            # print(f"Time to linearize system: {time.time() - t0} seconds")
-
-            # t0 = time.time()
-            K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
-            self.feedback_K = 1 * K
-            # print(f"Time taken for LQR synthesis for K_feedback: {time.time() - t0} seconds")
-
-            # t0 = time.time()
-            K, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)  # Compute the LQR gain matrix
-            self.reference_K = 1 * K  # Store the reference gain matrix
-            # print(f"Time taken for LQR synthesis for K_reference: {time.time() - t0} seconds")
-
-            
-            self.last_lqr_update_time = time.time() - self.T0  # Set the last LQR update time to the current time
-            print(f"Odom: time taken for entire LQR update: {time.time() - t00} seconds")
+        # Build the whole sample, then publish it with ONE assignment (atomic for readers)
+        self.state = VehicleState(
+            stamp=self.now(), x=x, y=y, z=z, vx=vx, vy=vy, vz=vz, ax=ax, ay=ay, az=az,
+            roll=roll, pitch=pitch, yaw=yaw,
+            nr_state_vector=np.array([x, y, z, vx, vy, vz, roll, pitch, yaw]),
+            rta_mm_gpr_state_vector_planar=np.array([y, z, vy, vz, roll]), # px, py, h, v, theta = x
+        )
+        self.debug(f"in odom, flat output: {[x, y, z, yaw]}")
 
 
+    def lqr_update_callback(self) -> None:
+        """Re-linearize the planar model and recompute both LQR gains when needed.
 
-        ODOMETRY_DEBUG_PRINT = True
-        if ODOMETRY_DEBUG_PRINT:
-            print(f"{self.nr_state_vector=}")
-            print(f"{self.output_vector=}")
-            print(f"{self.roll = }, {self.pitch = }, {self.yaw = }(rads)")
+        Previously this ran inline in the odometry callback (before the first RTA update) and in the
+        control callback (every 1.8 s, or EVERY tick while |yaw| > max_yaw_stray). It now runs in the
+        estimation callback group so its ~4 ms never delays a control tick.
+        """
+        s = self.state
+        if s is None:
+            return
+        t = self.now()
+        in_rta_window = self.begin_actuator_control <= t < self.land_time
+
+        if self.first_LQR and not in_rta_window:
+            # Before the RTA phase: linearize about hover at the current state (as the odometry callback did)
+            self.gains = self.compute_lqr_gains(s.rta_mm_gpr_state_vector_planar, self.hover_input_planar)
+            self.last_lqr_update_time = t
+        elif in_rta_window and ((t - self.last_lqr_update_time) >= 1.8 or abs(s.yaw) > self.max_yaw_stray):
+            self.update_lqr_feedback(self.quad_sys_planar, s.rta_mm_gpr_state_vector_planar, self.last_input[0:2], t)
+
+    def compute_lqr_gains(self, state, input) -> tuple:
+        noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
+        A, B = jitted_linearize_system(self.quad_sys_planar, state, input, noise, noise)
+        A, B = np.array(A), np.array(B)
+        K_feedback, _, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
+        K_reference, _, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)
+        return (np.asarray(K_feedback), np.asarray(K_reference))
 
 
     def wind_estimator_callback(self):
         """Callback function for the wind estimation callback"""
-        print(f"{BANNER}In wind callback")
-        if not self.in_offboard_mode:
-            print("Not in offboard mode, skipping wind estimation")
-            return
-        
-        wind_estimate_time = time.time() - self.T0
+        with self.loop_stats['wind'].measure():
+            self.debug(f"{BANNER}In wind callback")
+            if not self.in_offboard_mode:
+                self.debug("Not in offboard mode, skipping wind estimation")
+                return
+            s = self.state
+            if s is None: # offboard can engage before the first odometry message arrives
+                return
 
-        
-        NO_WIND_ESTIMATION = False
-        if NO_WIND_ESTIMATION:
-            self.wy, self.wz = 0., 0.
-            gz_windforce_in_y, gy_windforce_in_z = 0., 0.
-
-        else:
-            if not self.USE_EKF:
-                # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
-                _, ay_hat, az_hat = self.OBS_DYN@dynamics(self.nr_state_vector, self.last_input, self.MASS)
-                print(f"{ay_hat = }, {az_hat = }")
-                print(f"{self.ay}, {self.az}")
-                tracking_error_estimate = 0.09  # (m/s^2) estimate of the tracking error due to unmodeled dynamics and state estimation errors
+            wind_estimate_time = self.now()
+            last_input = self.last_input # one read: the control thread replaces this reference
 
 
-                # Estimate wind disturbance force in y-direction
-                ay_wind = (self.ay - ay_hat) 
-                gz_windforce_in_y = self.MASS * ay_wind
-                self.wy = gz_windforce_in_y
+            NO_WIND_ESTIMATION = False
+            if NO_WIND_ESTIMATION:
+                self.wy, self.wz = 0., 0.
+                gz_windforce_in_y, gy_windforce_in_z = 0., 0.
 
-
-                # Estimate wind disturbance force in z-direction
-                az_wind = (self.az - az_hat)
-                gy_windforce_in_z = self.MASS * az_wind
-                self.wz = gy_windforce_in_z
             else:
-                # Predict step
-                self.wind_ekf.predict()
+                if not self.USE_EKF:
+                    # Estimate wind in y and z (horizontal and vertical) directions using difference between measured and predicted acceleration
+                    _, ay_hat, az_hat = self.OBS_DYN@dynamics(s.nr_state_vector, last_input, self.MASS)
 
-                # Your existing model prediction:
-                _, ay_hat, az_hat = self.OBS_DYN @ dynamics(self.nr_state_vector,
-                                                            self.last_input,
-                                                            self.MASS)
-
-                # Update step with measurements
-                self.wy, self.wz = self.wind_ekf.update(
-                    ay_meas=self.ay,
-                    az_meas=self.az,
-                    ay_model=ay_hat,
-                    az_model=az_hat,
-                )
-                gz_windforce_in_y = self.wy
-                gy_windforce_in_z = self.wz
+                    # Estimate wind disturbance force in y-direction
+                    ay_wind = (s.ay - ay_hat)
+                    gz_windforce_in_y = self.MASS * ay_wind
+                    self.wy = gz_windforce_in_y
 
 
+                    # Estimate wind disturbance force in z-direction
+                    az_wind = (s.az - az_hat)
+                    gy_windforce_in_z = self.MASS * az_wind
+                    self.wz = gy_windforce_in_z
+                else:
+                    # Predict step
+                    self.wind_ekf.predict()
 
-        # Prep to fill in wind observation data for GPR
-        wind_idx = self.wind_count % self.n_obs
-        self.wind_count += 1
+                    # Your existing model prediction:
+                    _, ay_hat, az_hat = self.OBS_DYN @ dynamics(s.nr_state_vector,
+                                                                last_input,
+                                                                self.MASS)
 
-        gz_windforce_GPR_data_y = (wind_estimate_time, self.z, gz_windforce_in_y)
-        self.gz_wind_obs_in_y.at[wind_idx, :].set(jnp.array(gz_windforce_GPR_data_y))
+                    # Update step with measurements
+                    self.wy, self.wz = self.wind_ekf.update(
+                        ay_meas=s.ay,
+                        az_meas=s.az,
+                        ay_model=float(ay_hat),
+                        az_model=float(az_hat),
+                    )
+                    gz_windforce_in_y = self.wy
+                    gy_windforce_in_z = self.wz
 
 
-        gy_windforce_GPR_data_z = (wind_estimate_time, self.y, gy_windforce_in_z)
-        self.gy_wind_obs_in_z.at[wind_idx, :].set(jnp.array(gy_windforce_GPR_data_z))
 
+            # Prep to fill in wind observation data for GPR
+            wind_idx = self.wind_count % self.n_obs
+            self.wind_count += 1
 
-        # print(f"Wind in Y be added to buffer: [T, HEIGHT, WIND_CALC]: {gz_windforce_GPR_data_y}")
-        # print(f"Wind in Z be added to buffer: [T, HEIGHT, WIND_CALC]: {gy_windforce_GPR_data_z}")
-        # print(f"Default fake wind {self.obs}")
-        
-        if self.wind_count % 50 == 0 and wind_estimate_time < self.begin_actuator_control:
-            tr0 = time.time()
-            print("Running rollout after wind update")
-            self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([wind_estimate_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            if self.options.gp_learn:
+                # BUG FIX: the original `self.gz_wind_obs_in_y.at[i, :].set(...)` built a new JAX array and
+                # threw it away (JAX arrays are immutable), so the GP never saw a single wind estimate.
+                # Copy-on-write: modify a copy, then swap the reference so the rollout thread, which may be
+                # reading the old buffer right now, always sees a complete buffer.
+                new_obs_y = self.gz_wind_obs_in_y.copy()
+                new_obs_y[wind_idx, :] = (wind_estimate_time, s.z, gz_windforce_in_y)
+                self.gz_wind_obs_in_y = new_obs_y
 
-            self.reachable_tube.block_until_ready()
-            self.rollout_ref.block_until_ready()
-            self.rollout_feedfwd_input.block_until_ready()
+                new_obs_z = self.gy_wind_obs_in_z.copy()
+                new_obs_z[wind_idx, :] = (wind_estimate_time, s.y, gy_windforce_in_z)
+                self.gy_wind_obs_in_z = new_obs_z
 
-            # print(f"{self.reachable_tube=}")
-            print(f"Ran rollout after wind update: {time.time() - tr0} seconds")
-            # print(f"{self.reachable_tube[0:1, :]=}")
-            # exit(0)
+            if self.wind_count % 50 == 0 and wind_estimate_time < self.begin_actuator_control:
+                # Ask the rollout thread for a warm-up rollout instead of blocking this thread with it
+                self.debug("Requesting rollout after wind update")
+                self.warmup_rollout_requested.set()
 
 
     def rollout_callback(self):
-        """Callback function for the rollout timer."""
-        print(f"{BANNER}In rollout callback at time: ", time.time() - self.T0)
-        if self.begin_actuator_control - 1.0 <= self.time_from_start <= self.land_time:
-            try:
-                self.time_from_start = time.time() - self.T0
-                t00 = time.time()  # Start time for rollout computation
-                thresh = 1.0
-                current_time = self.time_from_start
-                # current_state = self.rta_mm_gpr_state_vector_planar
-                # current_state_interval = irx.icentpert(current_state, self.x_pert)
-                print(f"{current_time= }, {self.collection_time= }")
+        """Rollout timer: installs finished rollouts and starts a new one when the plan expires.
 
-                if current_time >= self.collection_time:
-                    print("Unsafe region begins now. Recomputing reachable tube and reference trajectory.")
+        Thread backend: ``submit`` blocks THIS callback group's thread for the whole rollout, which
+        is fine on a MultiThreadedExecutor (control keeps running in its own thread).
+        Process backend: ``submit``/``poll`` return immediately; the rollout runs in another process.
+        """
+        try:
+            result = self.rollout_backend.poll() # a result finished since the last tick (process backend)
+            if result is not None:
+                self.install_plan(result)
+            if self.rollout_backend.busy:
+                return
 
+            current_time = self.now()
+            warmup = self.warmup_rollout_requested.is_set()
+            in_window = self.begin_actuator_control - 1.0 <= current_time <= self.land_time
+            if not (warmup or (in_window and current_time >= self.collection_time)):
+                return # You're safe!
+            s, gains = self.state, self.gains
+            if s is None or gains is None:
+                return
+            if in_window and current_time >= self.collection_time:
+                warmup = False # a real (safety) rollout supersedes a pending warm-up request
+            self.warmup_rollout_requested.clear()
 
-                    tr0 = time.time()
+            self.debug(f"{BANNER}Unsafe region begins now at {current_time:.2f}. Recomputing reachable tube and reference trajectory.")
+            request = RolloutRequest(t_start=current_time,
+                                     state=s.rta_mm_gpr_state_vector_planar,
+                                     K_feedback=gains[0], K_reference=gains[1],
+                                     obs_wy=self.gz_wind_obs_in_y, obs_wz=self.gy_wind_obs_in_z,
+                                     warmup=warmup, submitted_at=time.time())
+            self.rollout_backend.submit(request)
 
-                    self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(jnp.array([current_time]), irx.icentpert(self.rta_mm_gpr_state_vector_planar, self.x_pert), self.rta_mm_gpr_state_vector_planar, self.feedback_K, self.reference_K, self.gz_wind_obs_in_y, self.gy_wind_obs_in_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE)
+            result = self.rollout_backend.poll() # thread backend: already done
+            if result is not None:
+                self.install_plan(result)
 
-                    self.reachable_tube.block_until_ready()
-                    self.rollout_ref.block_until_ready()
-                    self.rollout_feedfwd_input.block_until_ready()
+        except Exception as e:
+            frame = inspect.currentframe()
+            func_name = frame.f_code.co_name if frame is not None else "<unknown>"
+            print(f"\nError in {__name__}:{func_name}: {e}")
+            traceback.print_exc()
+            raise
 
+    def install_plan(self, result: RolloutResult) -> None:
+        """Turn a finished rollout into an immutable RolloutPlan and publish it for the control thread."""
+        req = result.request
+        latency = time.time() - req.submitted_at
 
-                    # print(f"{self.reachable_tube[0:3,:]=}")
-                    self.rollout_comptime = time.time() - tr0
-                    print(f"rollout calc time: {self.rollout_comptime} seconds")
+        collection_time = self.collection_time
+        if not req.warmup:
+            t_index = result.violation_idx
+            safety_horizon = t_index * self.tube_timestep
+            collection_time = req.t_start + safety_horizon  # Update the collection time based on the rollout start time and index
+            self.debug(f"{collection_time=}\n{safety_horizon=}")
 
+        # Stored tube slice for the log: starts where "now" is inside the plan once it is installed
+        tube_start = int(latency // self.control_period) + 1
+        tube_time_indices = slice(tube_start, tube_start + self.tube_extent, self.tube_skip)
+        save_tube = result.reachable_tube[tube_time_indices][:, self.tube_pos_indices]
 
-                    # self.reachable_tube, self.rollout_ref, self.rollout_feedfwd_input = jitted_rollout(
-                    #     current_time, current_state_interval, current_state, self.feedback_K, self.reference_K, self.wind_obs_z, self.tube_horizon, self.tube_timestep, self.perm, self.sys_mjacM, self.MASS, self.ulim_planar, self.quad_sys_planar, self.GOAL_STATE
-                    # )
+        with self.plan_lock:
+            self.plan_seq += 1
+            plan = RolloutPlan(t_start=req.t_start, dt=self.tube_timestep,
+                               reachable_tube=result.reachable_tube,
+                               rollout_ref=result.rollout_ref,
+                               feedfwd_input=result.feedfwd_input,
+                               collection_time=collection_time,
+                               compute_time=result.compute_time,
+                               latency=latency,
+                               save_tube=save_tube,
+                               tube_start=tube_start,
+                               seq=self.plan_seq)
+            self.collection_time = collection_time
+            self.plan = plan # <- the single atomic "publish"
 
-                    # self.reachable_tube.block_until_ready()
-                    # self.rollout_ref.block_until_ready()
-                    # self.rollout_feedfwd_input.block_until_ready()
-                    # print(f"Time taken by rollout: {time.time() - t0:.4f} seconds")
-
-                    # t0 = time.time()  # Reset time for collection index computation
-                    t_index = collection_id_jax(self.rollout_ref, self.reachable_tube, thresh)
-                    t_index = int(t_index)
-                    # print(f"Time taken for collection index computation: {time.time() - t0:.4f} seconds")
-
-                    safety_horizon = t_index * self.tube_timestep
-                    self.collection_time = current_time + safety_horizon  # Update the collection time based on the current time and index
-                    print(f"{self.collection_time=}\n{safety_horizon=}")
-
-                    self.traj_idx = 0
-
-                    self.tube_start = int(self.rollout_comptime // self.control_period) + 1 
-                    self.tube_time_indices = slice(self.tube_start, self.tube_start + self.tube_extent, self.tube_skip)
-                    self.save_tube = self.reachable_tube[self.tube_time_indices, self.tube_pos_indices] # maybe mess with this
-                    # exit(0)
-
-
-                else:
-                    print("You're safe!")
-                print(f"Time taken for whole rollout process: {time.time() - t00:.4f} seconds")
-
-
-            # except AttributeError as e: # for if we 
-            #     print("Ignoring missing attribute:", e)
-            #     return
-            except Exception as e:
-                frame = inspect.currentframe()
-                func_name = frame.f_code.co_name if frame is not None else "<unknown>"
-                print(f"\nError in {__name__}:{func_name}: {e}")
-                traceback.print_exc()
-                raise  # Re-raise  
-        else:
-            pass
+        self.rollout_compute_times.append(result.compute_time)
+        self.rollout_latencies.append(latency)
+        self.debug(f"rollout #{plan.seq} ({'warm-up' if req.warmup else 'safety'}): "
+                   f"compute {result.compute_time:.3f} s, latency {latency:.3f} s")
 
 
     def vehicle_status_callback(self, vehicle_status):
@@ -677,7 +830,7 @@ class OffboardControl(Node):
         self.in_land_mode = (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_LAND)
 
         if not self.in_offboard_mode:
-            print(f"{BANNER}"
+            self.debug(f"{BANNER}"
                   f"Not in offboard mode yet!"
                   f"Current vehicle status: {vehicle_status.nav_state}\n"
                   f"{VehicleStatus.NAVIGATION_STATE_OFFBOARD = }\n"
@@ -685,59 +838,73 @@ class OffboardControl(Node):
                   f"{self.in_land_mode=}\n"
                   f"{BANNER}")
             return
-        print(f"{BANNER}In Offboard Mode!{BANNER}")
+        self.debug(f"{BANNER}In Offboard Mode!{BANNER}")
 
     def offboard_heartbeat_signal_callback(self) -> None:
         """Callback function for the heartbeat signals that maintains flight controller in offboard mode and switches between offboard flight modes."""
-        self.time_from_start = time.time() - self.T0
-        t = self.time_from_start
-        print(f"{BANNER}In offboard callback at {self.time_from_start:.2f} seconds")
+        with self.loop_stats['heartbeat'].measure():
+            t = self.now()
+            self.debug(f"{BANNER}In offboard callback at {t:.2f} seconds")
 
-        if not self.offboard_mode_rc_switch_on: #integration of RC 'killswitch' for offboard to send heartbeat signal, engage offboard, and arm
-            print(f"Offboard Callback: RC Flight Mode Channel {self.MODE_CHANNEL} Switch Not Set to Offboard (-1: position, 0: offboard, 1: land) ")
-            self.offboard_heartbeat_counter = 0
-            return # skip the rest of this function if RC switch is not set to offboard
+            if not self.offboard_mode_rc_switch_on: #integration of RC 'killswitch' for offboard to send heartbeat signal, engage offboard, and arm
+                self.debug(f"Offboard Callback: RC Flight Mode Channel {self.MODE_CHANNEL} Switch Not Set to Offboard (-1: position, 0: offboard, 1: land) ")
+                self.offboard_heartbeat_counter = 0
+                return # skip the rest of this function if RC switch is not set to offboard
 
-        if t < self.begin_actuator_control:
-            publish_offboard_control_heartbeat_signal_position(self)
-        elif t < self.land_time:  
-            publish_offboard_control_heartbeat_signal_body_rate(self)
-        else:
-            publish_offboard_control_heartbeat_signal_position(self)
+            if t < self.begin_actuator_control:
+                publish_offboard_control_heartbeat_signal_position(self)
+            elif t < self.land_time:
+                publish_offboard_control_heartbeat_signal_body_rate(self)
+            else:
+                publish_offboard_control_heartbeat_signal_position(self)
 
 
-        if self.offboard_heartbeat_counter <= 10:
-            if self.offboard_heartbeat_counter == 10:
-                engage_offboard_mode(self)
-                arm(self)
-            self.offboard_heartbeat_counter += 1
+            if self.offboard_heartbeat_counter <= 10:
+                if self.offboard_heartbeat_counter == 10:
+                    engage_offboard_mode(self)
+                    arm(self)
+                self.offboard_heartbeat_counter += 1
+
+            if int(t) != int(t - self.heartbeat_period): # ~1 Hz status line (cheap, always on)
+                plan = self.plan
+                self.get_logger().info(
+                    f"t={t:5.1f}s offboard={self.in_offboard_mode} armed={self.armed} "
+                    f"plan#={plan.seq if plan else '-'} "
+                    f"rollout={1e3 * plan.compute_time if plan else float('nan'):.0f}ms")
 
     def control_algorithm_callback(self) -> None:
         """Callback function to handle control algorithm once in offboard mode."""
-        print(f"{BANNER}In control callback at time: ", time.time() - self.T0)  
-        self.time_from_start = time.time() - self.T0
-        t = self.time_from_start
-        if not (self.offboard_mode_rc_switch_on and (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD) ):
-            print(f"Not in offboard mode.\n"
-                  f"Current nav_state number: {self.vehicle_status.nav_state}\n"
-                  f"nav_state number for offboard: {VehicleStatus.NAVIGATION_STATE_OFFBOARD}\n"
-                  f"Offboard RC switch status: {self.offboard_mode_rc_switch_on}")
-            return  # skip the rest of this function if not in offboard mode
+        with self.loop_stats['control'].measure():
+            t = self.now()
+            self.debug(f"{BANNER}In control callback at time: ", t)
+            if not (self.offboard_mode_rc_switch_on and (self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD) ):
+                self.debug(f"Not in offboard mode.\n"
+                      f"Current nav_state number: {self.vehicle_status.nav_state}\n"
+                      f"nav_state number for offboard: {VehicleStatus.NAVIGATION_STATE_OFFBOARD}\n"
+                      f"Offboard RC switch status: {self.offboard_mode_rc_switch_on}")
+                return  # skip the rest of this function if not in offboard mode
+            s = self.state
+            if s is None:
+                return
 
-        if t < self.begin_actuator_control:
-            publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
-        elif t < self.land_time:
-            self.control_administrator()
-        elif t > self.land_time or (abs(self.z) <= 1.0 and t > 15):
-            print("Landing...")
-            publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
-            if abs(self.x) < 0.25 and abs(self.y) < 0.25 and abs(self.z) <= 0.90:
-                print("Vehicle is close to the ground, preparing to land.")
-                land(self)
-                disarm(self)
-                exit(0)
-        else:
-            raise ValueError("Unexpected time_from_start value or unexpected termination conditions")
+            if t < self.begin_actuator_control:
+                publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
+            elif t < self.land_time:
+                if self.plan is None or self.gains is None:
+                    # First safety rollout not installed yet: hold the pre-RTA setpoint instead of crashing
+                    publish_position_setpoint(self, 0., self.max_y, self.max_height, 0.0)
+                    return
+                self.control_administrator(t, s)
+            elif t > self.land_time or (abs(s.z) <= 1.0 and t > 15):
+                self.debug("Landing...")
+                publish_position_setpoint(self, 0.0, 0.0, -0.83, 0.0)
+                if abs(s.x) < 0.25 and abs(s.y) < 0.25 and abs(s.z) <= 0.90:
+                    print("Vehicle is close to the ground, preparing to land.")
+                    land(self)
+                    disarm(self)
+                    exit(0)
+            else:
+                raise ValueError("Unexpected time_from_start value or unexpected termination conditions")
 
     def get_ref(self, time_from_start: float) -> jnp.ndarray:
         """Get the reference trajectory for the LQR and NR tracker.
@@ -753,139 +920,92 @@ class OffboardControl(Node):
         y_des = 0.0
         z_des = np.clip(self.max_height + 0.1 * time_from_start, self.max_height, -0.55)  # Clip z_des to be between self.max_height and -0.55
 
-        vx_des = 0.0
-        vy_des = 0.0
-        vz_des = 0.0
-
-        roll_des = 0.0
-        pitch_des = 0.0
         yaw_des = 0.0
 
-        # ref_lqr_planar = jnp.array([y_des, z_des, vy_des, vz_des, roll_des])  # Reference position setpoint for planar LQR tracker (y, z, vy, vz, roll)
-        # ref_lqr_3D = jnp.array([x_des, y_des, z_des, vx_des, vy_des, vz_des, roll_des, pitch_des, yaw_des])
         ref_nr = jnp.array([x_des, y_des, z_des, yaw_des])  # Reference position setpoint for NR tracker (x, y, z, yaw)
-        return ref_nr  
+        return ref_nr
 
-    def control_administrator(self) -> None:
-        self.time_from_start = time.time() - self.T0
-        print(f"{BANNER}In control administrator at {self.time_from_start:.2f} seconds")
-        ref_nr = self.get_ref(self.time_from_start)
+    def control_administrator(self, t: float, s: VehicleState) -> None:
+        self.debug(f"{BANNER}In control administrator at {t:.2f} seconds")
+        ref_nr = self.get_ref(t)
 
         ctrl_T0 = time.time()
-        NR_new_u, _ = NR_tracker_original(self.nr_state_vector, self.last_input, ref_nr, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
-        print(f"Time taken for NR tracker: {time.time() - ctrl_T0:.4f} seconds")
+        NR_new_u, _ = NR_tracker_original(s.nr_state_vector, self.last_input, ref_nr, self.T_LOOKAHEAD, self.T_LOOKAHEAD_PRED_STEP, self.INTEGRATION_TIME, self.MASS)
+        self.debug(f"Time taken for NR tracker: {time.time() - ctrl_T0:.4f} seconds")
 
         rta_T0 = time.time()
-        rta_new_u_planar = self.rta_mm_gpr_administrator(self.rta_mm_gpr_state_vector_planar, self.last_input[0:2])  # Compute RTA-MM GPR control input for planar system
-        print(f"Time taken for RTA-MM GPR administrator: {time.time() - rta_T0:.4f} seconds")
-        control_comp_time = time.time() - ctrl_T0 # Time taken for control computation
-        print(f"\nEntire control Computation Time: {control_comp_time:.4f} seconds, Good for {1/control_comp_time:.2f}Hz control loop")
+        plan = self.plan # one read: the rollout thread may swap in a new plan at any moment
+        rta_new_u_planar, y_ref, z_ref, yaw_ref = self.rta_mm_gpr_administrator(t, s, plan)  # Compute RTA-MM GPR control input for planar system
+        self.debug(f"Time taken for RTA-MM GPR administrator: {time.time() - rta_T0:.4f} seconds")
 
-        print(f"{NR_new_u =}")
-        print(f"{rta_new_u_planar =}")
         new_u = jnp.hstack([rta_new_u_planar, NR_new_u[2:]])  # New control input from the RTA-MM GPR tracker
-        print(f"{new_u = }")
+        new_u_np = np.asarray(new_u)
+        control_comp_time = time.time() - ctrl_T0 # Time taken for control computation
+        self.debug(f"\nEntire control Computation Time: {control_comp_time:.4f} seconds, Good for {1/control_comp_time:.2f}Hz control loop")
+        self.debug(f"{NR_new_u =}\n{rta_new_u_planar =}\n{new_u = }")
 
         self.last_input = new_u  # Update the last input for the next iteration
-        new_force = new_u[0]
+        new_force = new_u_np[0]
         new_throttle = float(self.get_throttle_command_from_force(new_force))
-        new_roll_rate = float(new_u[1])  # Convert jax.numpy array to float
-        new_pitch_rate = float(new_u[2])  # Convert jax.numpy array to float
-        new_yaw_rate = float(new_u[3])    # Convert jax.numpy array to float
+        new_roll_rate = float(new_u_np[1])
+        new_pitch_rate = float(new_u_np[2])
+        new_yaw_rate = float(new_u_np[3])
         publish_body_rate_setpoint(self, new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate)
-        # exit(0)
 
         # Log the states, inputs, and reference trajectories for data analysis
-        state_input_ref_log_info = [self.time_from_start,
-                                    float(self.x), float(self.y), float(self.z), float(self.yaw),
+        state_input_ref_log_info = [t,
+                                    float(s.x), float(s.y), float(s.z), float(s.yaw),
                                     control_comp_time,
-                                    self.rollout_comptime,
-                                    0., self.y_ref, self.z_ref, self.yaw_ref,
+                                    plan.compute_time,
+                                    0., y_ref, z_ref, yaw_ref,
                                     new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                                     self.wy, self.wz
                                     ]
         self.update_logged_data(state_input_ref_log_info)
-        for reach_set in self.save_tube:
+        self.rollout_latency_log.append(plan.latency)
+        self.plan_age_log.append(t - plan.t_start)
+        self.plan_expired_log.append(1.0 if t > plan.collection_time else 0.0)
+        for reach_set in plan.save_tube:
             self.update_tube_data(reach_set)
 
-        for i in range(len(self.y_ref)):
-            ref_data = [self.y_ref[i], self.z_ref[i], self.yaw_ref[i]]
-            self.update_ref_data(ref_data)
+        for i in range(len(y_ref)):
+            self.update_ref_data([y_ref[i], z_ref[i], yaw_ref[i]])
 
-        print("==" * 30)
-
-    def update_lqr_feedback(self, sys, state, input, noise_y, noise_z):
-            print(f"{BANNER}UPDATING LQR")
+    def update_lqr_feedback(self, sys, state, input, t: float):
+            self.debug(f"{BANNER}UPDATING LQR")
             t0 = time.time()
-            A, B = jitted_linearize_system(sys, state, input, noise_y, noise_z)  # Linearize the system dynamics
-            K, P, _ = control.lqr(A, B, self.Q_planar, self.R_planar)
-            self.feedback_K = 1 * K
+            self.gains = self.compute_lqr_gains(state, input) # (K_feedback, K_reference), swapped in atomically
+            self.debug(f"LQR Update time: {time.time()-t0}")
 
-            K, P, _ = control.lqr(A, B, self.Q_ref_planar, self.R_ref_planar)  # Compute the LQR gain matrix
-            self.reference_K = 1 * K  # Store the reference gain matrix
-            print(f"LQR Update time: {time.time()-t0}")
-
-            self.last_lqr_update_time = self.time_from_start  # Update the last LQR update time
+            self.last_lqr_update_time = t  # Update the last LQR update time
             if self.first_LQR:
                 self.first_LQR = False  # Set first_LQR to False after the first update
-            PRINT_LQR_DEBUG = False  # Set to True to print debug information for LQR
-            if PRINT_LQR_DEBUG:
-                print(f"\n\n{'=' * 60}")
-                print(f"Linearized System Matrices:\n{A=}\n{B=}")
-                print(f"LQR Gain Matrix:\n{K=}")
-                print(f"Feedback Gain Matrix:\n{self.feedback_K}")
-                print(f"{A.shape=}, {B.shape=}, {self.feedback_K.shape=}")
-                print(f"{'=' * 60}\n\n")
 
-    def rta_mm_gpr_administrator(self, state, input):
+    def rta_mm_gpr_administrator(self, t: float, s: VehicleState, plan: RolloutPlan):
         """Run the RTA-MM administrator to compute the control inputs."""
-        self.time_from_start = time.time() - self.T0 # Update time from start of the program
-        print(f"{BANNER}In RTA-MM GPR Administrator at {self.time_from_start=:.2f}")
+        self.debug(f"{BANNER}In RTA-MM GPR Administrator at {t=:.2f}")
 
         t0 = time.time()  # Start time for RTA-MM GPR computation
-        current_state = self.rta_mm_gpr_state_vector_planar # Get the current state vector
+        current_state = s.rta_mm_gpr_state_vector_planar # Get the current state vector
+        feedback_K = self.gains[0]
 
-        # Re-linearize and re-compute the LQR gain every X seconds or when the yaw exceeds the maximum stray
-        if (self.time_from_start - self.last_lqr_update_time) >= 1.8 or abs(self.yaw) > self.max_yaw_stray:  
-            
-            # wind_force_y = jnp.array([self.wy])
-            # wind_force_z = jnp.array([self.wz])
+        # Time-indexed reference: the row of the plan that corresponds to *now*, regardless of how many
+        # control ticks actually ran since the plan was computed (replaces the per-tick traj_idx counter).
+        traj_idx = plan.index_at(t)
+        applied_input = u_applied(current_state, plan.rollout_ref[traj_idx, :], plan.feedfwd_input[traj_idx, :], feedback_K, self.ulim_planar)
+        self.debug(f"Ultimate ref (y,z): {plan.rollout_ref[-1,:2]}\n{traj_idx=}")
 
-            noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
-            wind_force_y = noise
-            wind_force_z = noise
-            self.update_lqr_feedback(self.quad_sys_planar, state, input, wind_force_y, wind_force_z)
+        # Plan arrays are NumPy, so this slicing is ~microseconds (it used to be several JAX dispatches)
+        row_indices = slice(traj_idx, traj_idx + self.tube_extent, self.tube_skip)
+        y_ref = plan.rollout_ref[row_indices, 0]
+        z_ref = plan.rollout_ref[row_indices, 1]
+        yaw_ref = plan.rollout_ref[row_indices, 4]
 
-        # Re-compute LQR input
-        applied_input = u_applied(current_state, self.rollout_ref[self.traj_idx, :], self.rollout_feedfwd_input[self.traj_idx, :], self.feedback_K, self.ulim_planar)
-        self.traj_idx += 1 #update trajectory index
-        print(f"Ultimate ref (y,z): {self.rollout_ref[-1,:2]}")
-        print(f"{self.traj_idx=}")
-
-
-        ref_save_start = self.traj_idx + self.tube_start
-        ref_save_end = ref_save_start + self.tube_extent
-        row_indices = slice(ref_save_start, ref_save_end, self.tube_skip)
-
-        self.y_ref = self.rollout_ref[row_indices, 0]
-        self.z_ref = self.rollout_ref[row_indices, 1]
-        self.yaw_ref = self.rollout_ref[row_indices, 4]
-        # self.vy_ref = self.rollout_ref[self.traj_idx, 2]
-        # self.vz_ref = self.rollout_ref[self.traj_idx, 3]
-
-        PRINT_RTA_DEBUG = False  # Set to True to print debug information for RTA-MM GPR
-        if PRINT_RTA_DEBUG:
-            print(f"{current_state=}")
-            print(f"{self.rollout_ref[self.traj_idx, :] =}")
-            print(f"{self.rollout_feedfwd_input[self.traj_idx, :] =}")
-            print(f"{applied_input=}")
-
-        print(f"Time taken for RTA-MM GPR computation: {time.time() - t0:.4f} seconds")
-        return applied_input
+        self.debug(f"Time taken for RTA-MM GPR computation: {time.time() - t0:.4f} seconds")
+        return applied_input, y_ref, z_ref, yaw_ref
 
 # ~~ The following functions handle the log update and data retrieval for analysis ~~
     def update_logged_data(self, data):
-        print("Updating Logged Data")
         self.time_log.append(data[0])
 
         self.x_log.append(data[1])

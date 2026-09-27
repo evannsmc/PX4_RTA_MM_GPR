@@ -11,7 +11,7 @@ MOTOR_INPUT_SCALING: float = MAX_ROTOR_SPEED #x500 gazebo simulation motor input
 
 def get_throttle_command_from_force(collective_thrust) -> float: #Converts force to throttle command
     """ Convert the positive collective thrust force to a positive throttle command. """
-    print(f"Conv2Throttle: collective_thrust: {collective_thrust}")
+    # print(f"Conv2Throttle: collective_thrust: {collective_thrust}")  # 100 Hz print; too slow for the control loop
     try:
         motor_speed = m.sqrt(collective_thrust / (4.0 * THRUST_CONSTANT))
         throttle_command = (motor_speed - MOTOR_VELOCITY_ARMED) / MOTOR_INPUT_SCALING

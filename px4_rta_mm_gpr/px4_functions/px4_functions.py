@@ -91,7 +91,7 @@ def publish_position_setpoint(self, x: float = 0.0, y: float = 0.0, z: float = -
     msg.yaw = yaw # yaw in radians
     msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
     self.trajectory_setpoint_publisher.publish(msg)
-    self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
+    self.get_logger().debug(f"Publishing position setpoints {[x, y, z, yaw]}")
 
 def publish_body_rate_setpoint(self, throttle: float = 0.0, p: float = 0.0, q: float = 0.0, r: float = 0.0) -> None:
     """Publish the body rate setpoint.
@@ -120,7 +120,7 @@ def publish_body_rate_setpoint(self, throttle: float = 0.0, p: float = 0.0, q: f
     msg.thrust_body[1] = 0.0
     msg.thrust_body[2] = -1 * float(throttle)
     self.vehicle_rates_setpoint_publisher.publish(msg)
-    self.get_logger().info(f"Publishing body rate setpoint: roll={p}, pitch={q}, yaw={r}, thrust_body={throttle}")
+    self.get_logger().debug(f"Publishing body rate setpoint: roll={p}, pitch={q}, yaw={r}, thrust_body={throttle}")
 
 def publish_vehicle_command(self, command, **params) -> None:
     """Publish a vehicle command."""
