@@ -1,0 +1,36 @@
+config,label,run,outcome,max_attitude_deg,max_pitch_deg,lowest_altitude_m,rate_hz,p99_period_ms,cert_gap_pct,rollout_ms,ctrl_us
+r3_base,infrastructure only,1,ok,33.94,23.10,0.48,100.00,10.07,0.00,3.29,271.69
+r3_base,infrastructure only,2,UPSET,178.54,83.31,-4.98,99.99,11.34,0.00,3.12,255.17
+r3_base,infrastructure only,3,UPSET,172.25,82.28,-2.05,100.00,13.41,0.00,2.84,216.51
+r3_base,infrastructure only,4,ok,37.67,22.39,1.54,100.00,10.21,0.00,2.83,179.24
+r3_thrust,+ mass-scaled thrust limits,1,ok,38.82,25.95,0.22,100.00,12.63,0.00,3.02,201.82
+r3_thrust,+ mass-scaled thrust limits,2,UPSET,88.54,84.78,-1.05,100.00,10.28,0.00,2.72,206.37
+r3_thrust,+ mass-scaled thrust limits,3,UPSET,179.21,83.23,-1.70,99.75,10.70,0.05,3.24,251.25
+r3_thrust,+ mass-scaled thrust limits,4,UPSET,180.00,26.98,-1.02,100.00,10.18,0.00,3.42,264.16
+r3_ramp,+ entry ramp,1,touch,52.94,52.94,-0.92,100.00,10.27,0.00,2.92,196.27
+r3_ramp,+ entry ramp,2,UPSET,179.53,87.34,-3.29,100.00,10.54,0.00,2.68,212.76
+r3_ramp,+ entry ramp,3,UPSET,161.29,80.93,-1.47,100.00,10.22,0.00,2.90,234.28
+r3_ramp,+ entry ramp,4,UPSET,179.20,88.64,-3.67,100.00,13.15,0.00,2.80,230.43
+r3_all,+ thrust limits + entry ramp,1,UPSET,180.00,79.40,-2.00,99.93,13.86,0.00,3.41,260.87
+r3_all,+ thrust limits + entry ramp,2,ok,55.03,55.03,0.51,100.00,13.98,0.00,3.75,239.20
+r3_all,+ thrust limits + entry ramp,3,ok,54.23,54.23,1.64,100.00,10.26,0.00,2.96,199.64
+r3_all,+ thrust limits + entry ramp,4,UPSET,178.26,86.01,-2.63,100.00,10.25,0.00,2.96,233.34
+r3_base_nogp,"infrastructure, no GP learning",1,ok,36.05,28.46,1.82,100.00,12.66,0.00,2.28,191.08
+r3_base_nogp,"infrastructure, no GP learning",2,touch,41.40,24.38,-0.36,100.01,13.05,0.00,2.87,257.97
+r3_base_nogp,"infrastructure, no GP learning",3,touch,40.65,25.48,-0.61,100.00,10.37,0.00,2.32,151.96
+r3_base_nogp,"infrastructure, no GP learning",4,UPSET,179.93,87.89,-9.87,100.00,13.82,0.00,3.01,255.40
+r4_old_nrref,infrastructure (repeat),1,ok,36.00,24.81,2.77,100.02,12.75,0.00,4.40,175.24
+r4_old_nrref,infrastructure (repeat),2,ok,35.03,21.93,1.33,100.00,10.32,0.00,3.55,149.53
+r4_old_nrref,infrastructure (repeat),3,touch,43.92,25.26,-0.78,100.00,12.11,0.00,3.38,155.33
+r4_old_nrref,infrastructure (repeat),4,touch,43.44,21.28,-0.68,100.00,10.36,0.00,4.74,236.35
+r4_old_nrref,infrastructure (repeat),5,touch,49.10,27.81,-0.70,100.00,11.99,0.00,3.49,138.47
+r4_nrplan,+ NR reference from plan,1,ok,32.39,2.79,3.05,100.00,10.77,0.00,13.30,573.12
+r4_nrplan,+ NR reference from plan,2,ok,30.28,2.05,2.89,99.99,13.38,0.00,12.71,613.93
+r4_nrplan,+ NR reference from plan,3,ok,31.94,2.44,3.02,99.95,13.35,0.00,12.96,636.96
+r4_nrplan,+ NR reference from plan,4,ok,32.81,2.24,2.90,100.00,12.92,0.00,12.30,615.10
+r4_nrplan,+ NR reference from plan,5,ok,31.00,3.24,3.14,100.00,10.28,0.00,3.66,185.65
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,1,ok,29.92,2.56,3.02,99.99,11.04,0.00,4.02,239.64
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,2,ok,31.79,2.70,2.90,100.00,10.27,0.00,6.33,249.67
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,3,ok,31.91,2.78,2.93,100.00,10.39,0.00,4.97,193.78
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,4,ok,31.54,3.21,2.82,99.95,12.33,0.05,5.35,178.93
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,5,ok,29.47,2.40,3.05,100.00,10.88,0.00,4.15,156.35

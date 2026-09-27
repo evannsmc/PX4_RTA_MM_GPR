@@ -1,3 +1,6 @@
 .quarto/
 _output/figures/
 *_files/
+
+/.quarto/
+**/*.quarto_ipynb

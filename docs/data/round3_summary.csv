@@ -1,0 +1,9 @@
+config,label,flights,upsets,touches,max_pitch_med,rate,p99,gaps,rollout,ctrl_us
+r3_base,infrastructure only,4,2,0,52.69,100.00,11.26,0.00,3.02,230.65
+r3_thrust,+ mass-scaled thrust limits,4,3,0,55.11,99.94,10.95,0.01,3.10,230.90
+r3_ramp,+ entry ramp,4,3,1,84.14,100.00,11.04,0.00,2.83,218.43
+r3_all,+ thrust limits + entry ramp,4,2,0,67.22,99.98,12.09,0.00,3.27,233.26
+r3_base_nogp,"infrastructure, no GP learning",4,1,2,26.97,100.00,12.48,0.00,2.62,214.10
+r4_old_nrref,infrastructure (repeat),5,0,3,24.81,100.00,11.50,0.00,3.92,170.98
+r4_nrplan,+ NR reference from plan,5,0,0,2.44,99.99,12.14,0.00,10.99,524.95
+r4_nrplan_thrust,+ NR reference from plan + thrust limits,5,0,0,2.70,99.99,10.98,0.01,4.96,203.67

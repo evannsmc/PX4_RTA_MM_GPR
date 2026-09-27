@@ -54,11 +54,12 @@ class RuntimeOptions:
     gc_freeze: bool = True               # move everything allocated during init out of the GC's reach
     gc_no_full: bool = True              # no automatic full (generation-2) collections during flight
     tube_early_exit: bool = True         # stop each rollout at its first certification violation + margin
-    tube_margin: float = 0.5             # (s) rows kept past the violation (fallback if a replan is late)
+    tube_margin: float = 1.0             # (s) rows kept past the violation (fallback + NR look-ahead)
     replan_lead: Optional[float] = None  # (s) start the next rollout this long before the plan expires; None = auto
+    nr_ref_from_plan: bool = True        # NR's y/z reference = the RTA plan at t + T_lookahead (no conflicting goals)
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
     thrust_limits_mass_scaled: bool = True # RTA thrust limits as fractions of hover thrust (hardware ratios)
-    entry_ramp: bool = True              # move the RTA goal from the entry position to GOAL_STATE at bounded speed
+    entry_ramp: bool = False             # move the RTA goal from the entry position to GOAL_STATE at bounded speed
     ramp_speed_y: float = 0.5            # (m/s) lateral speed of the ramped goal
     ramp_speed_z: float = 1.0            # (m/s) vertical speed of the ramped goal
     verbose: bool = False                # per-callback debug printing (slow: ~100s of prints/s)
@@ -337,7 +338,8 @@ class OffboardControl(Node):
             T_lookahead=self.T_LOOKAHEAD, wind_ekf_Q=np.diag(self.wind_ekf.Q), wind_ekf_R=np.diag(self.wind_ekf.R),
             tube_early_exit=options.tube_early_exit, tube_margin=options.tube_margin,
             replan_lead='auto' if options.replan_lead is None else options.replan_lead,
-            nr_anti_windup=options.nr_anti_windup, entry_ramp=options.entry_ramp,
+            nr_anti_windup=options.nr_anti_windup, nr_ref_from_plan=options.nr_ref_from_plan,
+            entry_ramp=options.entry_ramp,
             thrust_limits_mass_scaled=options.thrust_limits_mass_scaled,
             ramp_speed_y=options.ramp_speed_y, ramp_speed_z=options.ramp_speed_z))
 
@@ -938,6 +940,13 @@ class OffboardControl(Node):
         self.debug(f"{BANNER}In control administrator at {t:.2f} seconds")
         ref_nr = self.get_ref(t)
         plan = self.plan # one read: the rollout thread may swap in a new plan at any moment
+        if self.options.nr_ref_from_plan:
+            # The RTA flies thrust and roll along the plan; the NR tracker only keeps pitch and yaw. If the NR's own
+            # y/z reference differs from the plan (it was y=0, z=-12.5+0.1t), its coupled Newton step answers the
+            # y/z error with pitch/yaw rates, which fights the RTA (logged: pitch swinging -37..+52 deg). Give it the
+            # plan's y/z at its own prediction horizon, so only x and yaw are left for it to correct.
+            ahead = plan.rollout_ref[plan.index_at(t + self.T_LOOKAHEAD)]
+            ref_nr = np.array([ref_nr[0], ahead[0], ahead[1], ref_nr[3]])
         feedback_K = self.gains[0]
         if t > plan.collection_time:
             self.certification_gaps += 1 # running on an uncertified part of the plan (replan was late)

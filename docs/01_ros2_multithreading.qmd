@@ -298,9 +298,11 @@ arguments arrived with a different signature, so XLA recompiled mid-air:
 
 The trigger was the second RTA tick: `self.last_input` switches from the array created at
 start-up to the controller's own output (`jnp.hstack(...)`), which JAX treats as a different
-signature. The fix is to warm up **with the values the loop actually feeds back**: run the control
-step once, then run it again on its own output. To find such stalls, run with
-`JAX_LOG_COMPILES=1` and look for compilation messages after take-off.
+signature. A first fix was to warm up **with the values the loop actually feeds back**. The robust fix
+(document 03) is **ahead-of-time compilation**: `jax.jit(f).lower(shapes).compile()` produces an
+executable for one signature that can never recompile, and every in-flight argument is converted
+to a float64 NumPy array first. To find such stalls, run with `JAX_LOG_COMPILES=1` and look for
+compilation messages after take-off.
 
 ## Printing
 

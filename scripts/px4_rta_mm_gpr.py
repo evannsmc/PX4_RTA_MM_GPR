@@ -76,17 +76,20 @@ def main():
     parser.add_argument("--tube-early-exit", action=argparse.BooleanOptionalAction, default=True,
                         help="stop each rollout at its first certification violation + --tube-margin "
                              "(identical plan rows, ~20x less compute)")
-    parser.add_argument("--tube-margin", type=float, default=0.5,
+    parser.add_argument("--tube-margin", type=float, default=1.0,
                         help="seconds of plan kept past the violation, as a fallback if a replan is late")
     parser.add_argument("--replan-lead", type=float, default=None,
                         help="start the next rollout this many seconds before the plan expires "
                              "(default: auto = 2x recent worst-case rollout latency)")
+    parser.add_argument("--nr-ref-from-plan", action=argparse.BooleanOptionalAction, default=True,
+                        help="NR tracker's y/z reference = RTA plan at t + T_lookahead (instead of y=0, z=-12.5+0.1t)")
     parser.add_argument("--nr-anti-windup", action=argparse.BooleanOptionalAction, default=True,
                         help="clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)")
     parser.add_argument("--thrust-limits-mass-scaled", action=argparse.BooleanOptionalAction, default=True,
                         help="scale the RTA thrust limits [13, 21] N (tuned at 1.75 kg) with the vehicle mass")
-    parser.add_argument("--entry-ramp", action=argparse.BooleanOptionalAction, default=True,
-                        help="ramp the RTA goal from the entry position to GOAL_STATE at bounded speed")
+    parser.add_argument("--entry-ramp", action=argparse.BooleanOptionalAction, default=False,
+                        help="ramp the RTA goal from the entry position to GOAL_STATE at bounded speed "
+                             "(off by default: it increased upsets in the SITL ablation)")
     parser.add_argument("--ramp-speed-y", type=float, default=0.5, help="lateral goal ramp speed (m/s)")
     parser.add_argument("--ramp-speed-z", type=float, default=1.0, help="vertical goal ramp speed (m/s)")
     parser.add_argument("--gc-freeze", action=argparse.BooleanOptionalAction, default=True,
@@ -115,6 +118,7 @@ def main():
                              tube_margin=args.tube_margin,
                              replan_lead=args.replan_lead,
                              nr_anti_windup=args.nr_anti_windup,
+                             nr_ref_from_plan=args.nr_ref_from_plan,
                              entry_ramp=args.entry_ramp,
                              thrust_limits_mass_scaled=args.thrust_limits_mass_scaled,
                              ramp_speed_y=args.ramp_speed_y,

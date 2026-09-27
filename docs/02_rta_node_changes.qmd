@@ -52,7 +52,10 @@ ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --sim --log-file run1.log \
 | `--gc-freeze / --gc-no-full` | on / on | garbage-collector settings ([@sec-gc]) |
 | `--verbose` | off | the original per-callback printing (slow) |
 
-**Recommended on this machine:** `--executor events --rollout-backend process --tube-horizon 3`.
+**Recommended on this machine:** `--executor events --rollout-backend process`. Since round 3,
+rollouts stop at the certification point, so `--tube-horizon` is only an upper bound. See document 03
+for the round-3 flags (`--nr-ref-from-plan`, `--nr-anti-windup`, `--tube-margin`, `--replan-lead`,
+`--thrust-limits-mass-scaled`, `--entry-ramp`) and for the cause of the crashes.
 The defaults keep the paper's 30 s horizon and the plain multithreaded executor, so nothing changes
 unless you ask for it.
 
