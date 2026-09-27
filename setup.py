@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'px4_rta_mm_gpr = scripts.px4_rta_mm_gpr:main',
+            'flight_log = px4_rta_mm_gpr.flight_log.reader:main',
         ],
     },
 )

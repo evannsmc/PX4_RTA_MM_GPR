@@ -1,0 +1,23 @@
+project:
+  type: default
+  output-dir: _output
+  render:
+    - 01_ros2_multithreading.qmd
+    - 02_rta_node_changes.qmd
+
+
+format:
+  pdf:
+    documentclass: scrartcl
+    papersize: letter
+    geometry: margin=1in
+    toc: true
+    number-sections: true
+    colorlinks: true
+    fig-pos: "htbp"
+    code-block-bg: "#f6f8fa"
+    highlight-style: github
+    include-in-header:
+      text: |
+        \usepackage{fvextra}
+        \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}

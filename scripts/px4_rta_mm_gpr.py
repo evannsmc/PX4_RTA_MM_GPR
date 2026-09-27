@@ -8,10 +8,13 @@ import rclpy # Import ROS2 Python client library
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from .rta_mm_gpr_node import OffboardControl, RuntimeOptions
 # from .test_node import TestNode as OffboardControl
-try:
+try: # ROS2Logger is only used to pick the log directory (and to copy its analysis notebooks there)
     from ros2_logger import Logger # ROS2Logger >= Mar 2026 (package renamed)
 except ImportError:
-    from Logger import Logger # type: ignore
+    try:
+        from Logger import Logger # type: ignore
+    except ImportError:
+        Logger = None
 
 BANNER = "=" * 65
 
@@ -106,8 +109,8 @@ def main():
 
         try:
             offboard_control.close() # stop the rollout worker process (if any), print timing summary
-            if logger:
-                logger.log(offboard_control)
+            log_path = logger.full_path if logger else os.path.join(os.getcwd(), 'flight_logs', filename)
+            offboard_control.save_flight_log(log_path) # <name>.h5 + legacy <name>.csv
             offboard_control.destroy_node()
         except Exception as e:
             frame = inspect.currentframe()
@@ -127,7 +130,7 @@ def main():
 
     try:
         print(f"{BANNER}\nInitializing ROS 2 node ({type(executor).__name__})\n{BANNER}")
-        logger = Logger(filename, base_path)
+        logger = Logger(filename, base_path) if Logger else None
         executor.spin()
     except KeyboardInterrupt:
         print("\nKeyboard interrupt detected (Ctrl+C), exiting...")

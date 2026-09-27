@@ -1,0 +1,13 @@
+Timing summary (executor=multi, rollout backend=thread)
+   control: n=  4541  rate=   89.1 Hz (nominal 100)  period p50/p99/max =   10.04/  35.65/  414.18 ms  exec p50/max =   0.85/   91.13 ms  misses=268 (5.9%)
+ heartbeat: n=   493  rate=    9.7 Hz (nominal 10)  period p50/p99/max =  100.03/ 267.47/  438.46 ms  exec p50/max =   0.27/  388.07 ms  misses=12 (2.4%)
+      wind: n=   495  rate=    9.7 Hz (nominal 10)  period p50/p99/max =  100.04/ 249.23/  439.80 ms  exec p50/max =   2.07/  161.45 ms  misses=11 (2.2%)
+ rollout compute: n=74  mean=166.9 ms  p50=166.2 ms  max=254.0 ms
+ rollout latency: n=74  mean=167.2 ms  p50=166.3 ms  max=254.1 ms
+        gc gen 0: n=770  total=0.144 s  p50=0.15 ms  max=1.4 ms
+        gc gen 1: n=70  total=0.112 s  p50=1.41 ms  max=4.6 ms
+        gc gen 2: n=5  total=1.641 s  p50=329.53 ms  max=473.1 ms
+============================================================
+
+gc-tracked objects: 22278 (+463525 frozen); top: list=21807, tuple=83, ReferenceType=47, dict=38, cell=29, lock=23
+compiles_total 109

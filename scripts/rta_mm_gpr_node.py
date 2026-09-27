@@ -36,10 +36,7 @@ from px4_rta_mm_gpr.concurrency import (
 
 import immrax as irx
 import jax.numpy as jnp
-try:
-    from ros2_logger import LogType, VectorLogType # ROS2Logger >= Mar 2026 (package renamed)
-except ImportError:
-    from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
+from px4_rta_mm_gpr.flight_log import FlightRecorder
 
 BANNER = '\n' + "==" * 30 + '\n'
 
@@ -188,35 +185,6 @@ class OffboardControl(Node):
         self.wy, self.wz = 0.0, 0.0 # latest wind force estimates (written by the wind thread)
 
 
-        # Logging related variables
-        self.time_log = LogType("time", 0)
-
-        self.x_log = LogType("x", 1)
-        self.y_log = LogType("y", 2)
-        self.z_log = LogType("z", 3)
-        self.yaw_log = LogType("yaw", 4)
-
-        self.ctrl_comp_time_log = LogType("ctrl_comp_time", 5)
-        self.rollout_comptime_log = LogType("rollout_comptime", 6)
-
-        self.y_ref_log = LogType("y_ref", 7)
-        self.z_ref_log = LogType("z_ref", 8)
-        self.yaw_ref_log = LogType("yaw_ref", 9)
-
-        self.throttle_log = LogType("throttle", 10)
-        self.roll_rate_log = LogType("roll_rate", 11)
-        self.pitch_rate_log = LogType("pitch_rate", 12)
-        self.yaw_rate_log = LogType("yaw_rate", 13)
-
-        self.save_tube_log = VectorLogType("save_tube", 14, ['pyL', 'pzL', 'pyH', 'pzH'])
-        self.wy_log = LogType("wy", 15)
-        self.wz_log = LogType("wz", 16)
-
-        # Concurrency diagnostics (new): how old / how late the plan used by each control tick is
-        self.rollout_latency_log = LogType("rollout_latency", 17) # (s) rollout submit -> plan installed
-        self.plan_age_log = LogType("plan_age", 18)               # (s) now - plan.t_start at this control tick
-        self.plan_expired_log = LogType("plan_expired", 19)       # 1 if now > plan.collection_time at this tick
-
         self.tube_pos_indices = [0, 1, 5, 6]  # Indices for x, y, z, yaw in the rollout reference trajectory
 
         self.tube_start = 9
@@ -224,11 +192,6 @@ class OffboardControl(Node):
         self.tube_skip = 2
 
 
-        self.metadata = np.array(['Sim' if self.sim else 'Hardware',
-                                  f'executor={options.executor}',
-                                  f'rollout_backend={options.rollout_backend}',
-                                  f'gp_learn={options.gp_learn}',
-                                ])
 
 ##########################################################################################
         # Callback groups: callbacks in the SAME mutually-exclusive group never run at the same time;
@@ -310,7 +273,6 @@ class OffboardControl(Node):
         self.rollout_latencies: list = []
         self.gc_pauses = {0: [], 1: [], 2: []} # (s) stop-the-world garbage collection pauses per generation
         self._gc_start = None
-        gc.callbacks.append(self._gc_callback)
 
         # Shared state between threads. Each of these is only ever REPLACED (one reference
         # assignment, atomic in CPython), never mutated in place.
@@ -337,6 +299,21 @@ class OffboardControl(Node):
             self.max_height = -3.75
             self.max_y = -2.5
 
+        # Flight recorder: preallocated buffers, written to HDF5 (+ legacy CSV) at shutdown
+        self.recorder = FlightRecorder(metadata=dict(
+            platform='sim' if self.sim else 'hardware', mass=float(self.MASS),
+            executor=options.executor, rollout_backend=options.rollout_backend,
+            gp_learn=options.gp_learn, gc_freeze=options.gc_freeze, gc_no_full=options.gc_no_full,
+            tube_horizon=self.tube_horizon, tube_timestep=self.tube_timestep,
+            collection_threshold=self.collection_threshold, control_period=self.control_period,
+            begin_actuator_control=float(self.begin_actuator_control), land_time=float(self.land_time),
+            max_height=self.max_height, max_y=self.max_y,
+            goal_state=np.asarray(self.GOAL_STATE), x_pert=np.asarray(self.x_pert),
+            Q_planar=np.diag(np.asarray(self.Q_planar)), R_planar=np.diag(np.asarray(self.R_planar)),
+            Q_ref_planar=np.diag(np.asarray(self.Q_ref_planar)), R_ref_planar=np.diag(np.asarray(self.R_ref_planar)),
+            ulim_lower=np.asarray(self.rollout_config.ulim_lower), ulim_upper=np.asarray(self.rollout_config.ulim_upper),
+            T_lookahead=self.T_LOOKAHEAD, wind_ekf_Q=np.diag(self.wind_ekf.Q), wind_ekf_R=np.diag(self.wind_ekf.R)))
+
         if self.options.gc_freeze:
             # Everything allocated so far (JAX/XLA caches, compiled functions, immrax objects, ROS entities)
             # lives for the whole flight. gc.freeze() moves it to a permanent generation that the collector
@@ -350,6 +327,8 @@ class OffboardControl(Node):
             # the explicit gc.collect() at shutdown. For a flight of a few minutes the extra memory is small.
             g0, g1, _ = gc.get_threshold()
             gc.set_threshold(g0, g1, 1_000_000_000)
+
+        gc.callbacks.append(self._gc_callback) # registered after init: only in-flight collections are reported
 
         # Timers for my callback functions (created last so no callback runs before init finishes)
         self.offboard_timer = self.create_timer(self.heartbeat_period,
@@ -583,6 +562,20 @@ class OffboardControl(Node):
         return (f"gc-tracked objects: {sum(counts.values())} (+{gc.get_freeze_count()} frozen); top: "
                 + ', '.join(f"{name}={n}" for name, n in counts.most_common(top)))
 
+    def save_flight_log(self, path: str) -> str:
+        """Write the HDF5 flight log (and the legacy ROS2Logger CSV next to it)."""
+        timing = {f'{name}_period': st.periods() for name, st in self.loop_stats.items()}
+        timing.update({f'{name}_exec': st.exec_times() for name, st in self.loop_stats.items()})
+        timing.update(rollout_compute=self.rollout_compute_times, rollout_latency=self.rollout_latencies,
+                      **{f'gc_gen{g}_pause': v for g, v in self.gc_pauses.items()})
+        h5_path = self.recorder.save(path, timing=timing)
+        from px4_rta_mm_gpr.flight_log import FlightLog
+        with FlightLog(h5_path) as log:
+            csv_path = log.to_legacy_csv(os.path.splitext(h5_path)[0] + '.csv')
+        print(f"[flight_log] {h5_path} ({os.path.getsize(h5_path) / 1e6:.1f} MB, {len(self.recorder.ticks)} ticks, "
+              f"{len(self.recorder.plans)} plans)\n[flight_log] legacy CSV: {csv_path}")
+        return h5_path
+
     def timing_summary(self) -> str:
         lines = [f"{BANNER}Timing summary (executor={self.options.executor}, "
                  f"rollout backend={self.options.rollout_backend})"]
@@ -648,8 +641,18 @@ class OffboardControl(Node):
             # Before the RTA phase: linearize about hover at the current state (as the odometry callback did)
             self.gains = self.compute_lqr_gains(s.rta_mm_gpr_state_vector_planar, self.hover_input_planar)
             self.last_lqr_update_time = t
-        elif in_rta_window and ((t - self.last_lqr_update_time) >= 1.8 or abs(s.yaw) > self.max_yaw_stray):
+            self.recorder.gain_update(t, True, *self.gains)
+        elif in_rta_window and ((t - self.last_lqr_update_time) >= 1.8 or abs(self.yaw_error(t, s.yaw)) > self.max_yaw_stray):
             self.update_lqr_feedback(self.quad_sys_planar, s.rta_mm_gpr_state_vector_planar, self.last_input[0:2], t)
+
+    def yaw_error(self, t: float, yaw: float) -> float:
+        """Yaw tracking error wrapped to [-pi, pi].
+
+        The re-linearisation trigger used to test |yaw| > max_yaw_stray, which is permanently true whenever
+        the desired yaw is not 0 (or after a full turn, since adjust_yaw() unwraps yaw to an absolute angle).
+        """
+        yaw_des = float(self.get_ref(t)[3])
+        return float(np.arctan2(np.sin(yaw - yaw_des), np.cos(yaw - yaw_des)))
 
     def compute_lqr_gains(self, state, input) -> tuple:
         noise = jnp.array([0.0])  # Small noise to avoid singularity in linearization
@@ -715,6 +718,10 @@ class OffboardControl(Node):
                     gy_windforce_in_z = self.wz
 
 
+
+            if not NO_WIND_ESTIMATION:
+                self.recorder.wind_sample(wind_estimate_time, gz_windforce_in_y, gy_windforce_in_z, s.ay, s.az,
+                                          float(ay_hat), float(az_hat), s.z, s.y)
 
             # Prep to fill in wind observation data for GPR
             wind_idx = self.wind_count % self.n_obs
@@ -812,10 +819,14 @@ class OffboardControl(Node):
                                latency=latency,
                                save_tube=save_tube,
                                tube_start=tube_start,
-                               seq=self.plan_seq)
+                               seq=self.plan_seq,
+                               state0=req.state, K_feedback=req.K_feedback, K_reference=req.K_reference,
+                               obs_wy=req.obs_wy, obs_wz=req.obs_wz,
+                               violation_idx=result.violation_idx, warmup=req.warmup)
             self.collection_time = collection_time
             self.plan = plan # <- the single atomic "publish"
 
+        self.recorder.add_plan(plan)
         self.rollout_compute_times.append(result.compute_time)
         self.rollout_latencies.append(latency)
         self.debug(f"rollout #{plan.seq} ({'warm-up' if req.warmup else 'safety'}): "
@@ -935,7 +946,7 @@ class OffboardControl(Node):
 
         rta_T0 = time.time()
         plan = self.plan # one read: the rollout thread may swap in a new plan at any moment
-        rta_new_u_planar, y_ref, z_ref, yaw_ref = self.rta_mm_gpr_administrator(t, s, plan)  # Compute RTA-MM GPR control input for planar system
+        rta_new_u_planar, traj_idx = self.rta_mm_gpr_administrator(t, s, plan)  # Compute RTA-MM GPR control input for planar system
         self.debug(f"Time taken for RTA-MM GPR administrator: {time.time() - rta_T0:.4f} seconds")
 
         new_u = jnp.hstack([rta_new_u_planar, NR_new_u[2:]])  # New control input from the RTA-MM GPR tracker
@@ -952,29 +963,16 @@ class OffboardControl(Node):
         new_yaw_rate = float(new_u_np[3])
         publish_body_rate_setpoint(self, new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate)
 
-        # Log the states, inputs, and reference trajectories for data analysis
-        state_input_ref_log_info = [t,
-                                    float(s.x), float(s.y), float(s.z), float(s.yaw),
-                                    control_comp_time,
-                                    plan.compute_time,
-                                    0., y_ref, z_ref, yaw_ref,
-                                    new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
-                                    self.wy, self.wz
-                                    ]
-        self.update_logged_data(state_input_ref_log_info)
-        self.rollout_latency_log.append(plan.latency)
-        self.plan_age_log.append(t - plan.t_start)
-        self.plan_expired_log.append(1.0 if t > plan.collection_time else 0.0)
-        for reach_set in plan.save_tube:
-            self.update_tube_data(reach_set)
-
-        for i in range(len(y_ref)):
-            self.update_ref_data([y_ref[i], z_ref[i], yaw_ref[i]])
+        # One preallocated row per tick (plans themselves are stored once, when installed)
+        self.recorder.tick(t, s.x, s.y, s.z, s.yaw, s.vx, s.vy, s.vz, s.roll, s.pitch,
+                           float(new_force), new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
+                           control_comp_time, self.wy, self.wz, plan, traj_idx)
 
     def update_lqr_feedback(self, sys, state, input, t: float):
             self.debug(f"{BANNER}UPDATING LQR")
             t0 = time.time()
             self.gains = self.compute_lqr_gains(state, input) # (K_feedback, K_reference), swapped in atomically
+            self.recorder.gain_update(t, False, *self.gains)
             self.debug(f"LQR Update time: {time.time()-t0}")
 
             self.last_lqr_update_time = t  # Update the last LQR update time
@@ -995,39 +993,5 @@ class OffboardControl(Node):
         applied_input = u_applied(current_state, plan.rollout_ref[traj_idx, :], plan.feedfwd_input[traj_idx, :], feedback_K, self.ulim_planar)
         self.debug(f"Ultimate ref (y,z): {plan.rollout_ref[-1,:2]}\n{traj_idx=}")
 
-        # Plan arrays are NumPy, so this slicing is ~microseconds (it used to be several JAX dispatches)
-        row_indices = slice(traj_idx, traj_idx + self.tube_extent, self.tube_skip)
-        y_ref = plan.rollout_ref[row_indices, 0]
-        z_ref = plan.rollout_ref[row_indices, 1]
-        yaw_ref = plan.rollout_ref[row_indices, 4]
-
         self.debug(f"Time taken for RTA-MM GPR computation: {time.time() - t0:.4f} seconds")
-        return applied_input, y_ref, z_ref, yaw_ref
-
-# ~~ The following functions handle the log update and data retrieval for analysis ~~
-    def update_logged_data(self, data):
-        self.time_log.append(data[0])
-
-        self.x_log.append(data[1])
-        self.y_log.append(data[2])
-        self.z_log.append(data[3])
-        self.yaw_log.append(data[4])
-
-        self.ctrl_comp_time_log.append(data[5])
-        self.rollout_comptime_log.append(data[6])
-
-        self.throttle_log.append(data[11])
-        self.roll_rate_log.append(data[12])
-        self.pitch_rate_log.append(data[13])
-        self.yaw_rate_log.append(data[14])
-
-        self.wy_log.append(data[15])
-        self.wz_log.append(data[16])
-
-    def update_tube_data(self, data):
-        self.save_tube_log.append(*data)
-
-    def update_ref_data(self, data):
-        self.y_ref_log.append(data[0])
-        self.z_ref_log.append(data[1])
-        self.yaw_ref_log.append(data[2])
+        return applied_input, traj_idx

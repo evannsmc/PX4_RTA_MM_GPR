@@ -25,6 +25,14 @@ class RolloutPlan:
     save_tube: np.ndarray         # slice of the tube stored in the log for plotting
     tube_start: int               # first tube row stored in the log
     seq: int                      # monotonically increasing plan number
+    # Inputs that produced this plan (logged so every plan can be reproduced offline)
+    state0: np.ndarray = None     # planar state the rollout started from
+    K_feedback: np.ndarray = None
+    K_reference: np.ndarray = None
+    obs_wy: np.ndarray = None     # GP data (t, height, wind) used for the y-wind GP
+    obs_wz: np.ndarray = None
+    violation_idx: int = -1       # first row where the tube left the threshold (-1: none)
+    warmup: bool = False
 
     def index_at(self, t: float) -> int:
         """Time-indexed lookup: the reference row that corresponds to time ``t``.
