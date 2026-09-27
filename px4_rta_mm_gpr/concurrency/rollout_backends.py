@@ -46,6 +46,8 @@ class RolloutConfig:
     n_obs: int = 9                # rows in each GP data buffer
     early_exit: bool = True       # stop integrating at the first violation + margin_steps
     margin_steps: int = 50        # rows kept past the violation (fallback reference if a replan is late)
+    min_altitude: Optional[float] = None  # (m) the whole tube must stay this far above the ground (None: no floor)
+    gp_feedforward: bool = False  # reference thrust cancels the GP mean disturbance
 
 
 @dataclass(frozen=True)
@@ -104,10 +106,12 @@ class RolloutEngine:
         self.n_steps = len(np.arange(0, config.horizon, config.timestep)) # same length as the full scan
 
         cfg = config
+        z_max = float('inf') if cfg.min_altitude is None else -float(cfg.min_altitude) # NED floor
         if cfg.early_exit:
             core = partial(rollout_until_violation, n_steps=self.n_steps, dt=cfg.timestep, perm=self.perm,
                            sys_mjacM=self.sys_mjacM, MASS=cfg.mass, ulim=self.ulim, quad_sys=self.quad_sys,
-                           threshold=cfg.collection_threshold, margin_steps=cfg.margin_steps)
+                           threshold=cfg.collection_threshold, margin_steps=cfg.margin_steps, z_max=z_max,
+                           gp_feedforward=cfg.gp_feedforward)
 
             def rollout(t0, state, x_pert, K_fb, K_ref, obs_wy, obs_wz, goal):
                 return core(t0, irx.icentpert(state, x_pert), state, K_fb, K_ref, obs_wy, obs_wz, goal)
@@ -115,8 +119,8 @@ class RolloutEngine:
             def rollout(t0, state, x_pert, K_fb, K_ref, obs_wy, obs_wz, goal):
                 tube, ref, u = jitted_rollout(t0, irx.icentpert(state, x_pert), state, K_fb, K_ref, obs_wy, obs_wz,
                                               cfg.horizon, cfg.timestep, self.perm, self.sys_mjacM, cfg.mass,
-                                              self.ulim, self.quad_sys, goal)
-                return tube, ref, u, collection_id_jax(ref, tube, cfg.collection_threshold), ref.shape[0]
+                                              self.ulim, self.quad_sys, goal, gp_feedforward=cfg.gp_feedforward)
+                return tube, ref, u, collection_id_jax(ref, tube, cfg.collection_threshold, z_max), ref.shape[0]
 
         f64 = lambda *shape: jax.ShapeDtypeStruct(shape, jnp.float64)
         self._shapes = [(1,), (5,), (5,), (2, 5), (2, 5), (cfg.n_obs, 3), (cfg.n_obs, 3), (5,)]

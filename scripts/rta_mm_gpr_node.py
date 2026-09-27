@@ -58,6 +58,10 @@ class RuntimeOptions:
     replan_lead: Optional[float] = None  # (s) start the next rollout this long before the plan expires; None = auto
     nr_ref_from_plan: bool = True        # NR's y/z reference = the RTA plan at t + T_lookahead (no conflicting goals)
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
+    gp_feedforward: bool = True          # reference thrust cancels the GP mean disturbance (no altitude offset)
+    min_altitude: float = 0.3            # (m) certified tubes must stay this far above the ground (<= 0: no floor)
+    backup: str = 'land'                 # 'land': PX4 LAND when no certified plan exists; 'none': keep flying
+    backup_grace: float = 0.02           # (s) how long a plan may be expired before the backup engages
     thrust_limits_mass_scaled: bool = True # RTA thrust limits as fractions of hover thrust (hardware ratios)
     entry_ramp: bool = False             # move the RTA goal from the entry position to GOAL_STATE at bounded speed
     ramp_speed_y: float = 0.5            # (m/s) lateral speed of the ramped goal
@@ -304,6 +308,8 @@ class OffboardControl(Node):
         self.warmup_rollout_requested = threading.Event() # wind thread asks the rollout thread for a warm-up rollout
         self.collection_time: float = 0.0  # Time at which the collection starts (rollout thread only)
         self.certification_gaps: int = 0   # control ticks that ran on an expired plan (should stay 0)
+        self.backup_engaged: Optional[str] = None # reason, once the backup (LAND) has been commanded
+        self.uncertified_since: Optional[float] = None # start of the current stretch without a certified plan
         self.ramp_origin = None            # (t, y, z) where the RTA goal ramp starts
 
         self.init_jit_compile_nr_rta() # Initialize JIT compilation for NR tracker and RTA pipeline
@@ -341,6 +347,8 @@ class OffboardControl(Node):
             nr_anti_windup=options.nr_anti_windup, nr_ref_from_plan=options.nr_ref_from_plan,
             entry_ramp=options.entry_ramp,
             thrust_limits_mass_scaled=options.thrust_limits_mass_scaled,
+            gp_feedforward=options.gp_feedforward, min_altitude=options.min_altitude,
+            backup=options.backup, backup_grace=options.backup_grace,
             ramp_speed_y=options.ramp_speed_y, ramp_speed_z=options.ramp_speed_z))
 
         if self.options.gc_freeze:
@@ -410,7 +418,9 @@ class OffboardControl(Node):
         self.INTEGRATION_TIME: float = self.control_period # integration time constant for the controller in seconds
 
         # Initialize rta_mm_gpr variables
-        self.GOAL_STATE = jnp.array([0., -0.6, 0., 0., 0.])
+        # Goal 1.0 m above the take-off point (was 0.6 m, which relied on the removed sim "+0.5 m" z adjustment and sat
+        # only 0.3 m above the ground floor; see docs/04).
+        self.GOAL_STATE = jnp.array([0., -1.0, 0., 0., 0.])
         x0 = jnp.array([0.1, 0.1, 0.1, 0.02, 0.03])  # representative planar state (only for start-up printing)
 
         np.random.seed(0)
@@ -466,7 +476,9 @@ class OffboardControl(Node):
 
 
         #(py,pz,h,v,theta)
-        self.Q_ref_planar =jnp.array([40, 5, 40, 5, 3]) * jnp.eye(self.quad_sys_planar.xlen) # Different weights that prioritize reference reaching origin
+        # Reference weights (py, pz, h, v, theta). Was [40, 5, 40, 5, 3]: vertically under-damped -- from 2.8 m sinking at
+        # 1.5 m/s the reference overshot a 0.6 m goal down to ~0 m. pz 10 / v 40 bottoms out at ~0.66 m for a 1.0 m goal.
+        self.Q_ref_planar =jnp.array([40, 10, 40, 40, 3]) * jnp.eye(self.quad_sys_planar.xlen)
         self.R_ref_planar = jnp.array([50, 20]) * jnp.eye(2)
 
 
@@ -483,7 +495,9 @@ class OffboardControl(Node):
             collection_threshold=self.collection_threshold,
             n_obs=self.n_obs,
             early_exit=self.options.tube_early_exit,
-            margin_steps=int(round(self.options.tube_margin / self.tube_timestep)))
+            margin_steps=int(round(self.options.tube_margin / self.tube_timestep)),
+            min_altitude=self.options.min_altitude if self.options.min_altitude > 0 else None,
+            gp_feedforward=self.options.gp_feedforward)
 
         # The process backend starts FIRST so the worker's rollout compilation overlaps with ours.
         rollout_backend = None
@@ -591,7 +605,9 @@ class OffboardControl(Node):
 
         x = msg.position[0]
         y = msg.position[1]
-        z = (msg.position[2] + 0.5) if (self.sim and (abs(msg.position[2]) < 1.2)) else msg.position[2]  # Adjust for sim ground level if needed
+        # PX4's local z (NED, 0 at the take-off point). The earlier sim-only "+0.5 m when |z| < 1.2 m" adjustment
+        # is gone: the ground is now handled explicitly (min_altitude in the certificate + LAND backup).
+        z = msg.position[2]
 
         vx, vy, vz = msg.velocity
         ax, ay, az = msg.acceleration
@@ -895,7 +911,7 @@ class OffboardControl(Node):
                       f"Offboard RC switch status: {self.offboard_mode_rc_switch_on}")
                 return  # skip the rest of this function if not in offboard mode
             s = self.state
-            if s is None:
+            if s is None or self.backup_engaged is not None:
                 return
 
             if t < self.begin_actuator_control:
@@ -949,7 +965,18 @@ class OffboardControl(Node):
             ref_nr = np.array([ref_nr[0], ahead[0], ahead[1], ref_nr[3]])
         feedback_K = self.gains[0]
         if t > plan.collection_time:
-            self.certification_gaps += 1 # running on an uncertified part of the plan (replan was late)
+            self.certification_gaps += 1 # running on an uncertified part of the plan (no certified successor yet)
+            # Measure how long we have been CONTINUOUSLY uncertified -- not the age of this particular plan: near the
+            # floor, fresh plans certified for 0 s arrive every ~10 ms, so no single plan is ever "old".
+            if self.uncertified_since is None:
+                self.uncertified_since = t
+            if self.options.backup == 'land' and t - self.uncertified_since > self.options.backup_grace:
+                self.engage_backup(t, f"no certified plan for {t - self.uncertified_since:.3f} s (latest plan #{plan.seq}: "
+                                      f"violation row {plan.violation_idx}, lowest tube altitude "
+                                      f"{-plan.reachable_tube[:plan.violation_idx + 1, 6].max():.2f} m)")
+                return
+        else:
+            self.uncertified_since = None
 
         # Time-indexed reference: the row of the plan that corresponds to *now*, regardless of how many
         # control ticks actually ran since the plan was computed (replaces the per-tick traj_idx counter).
@@ -975,6 +1002,15 @@ class OffboardControl(Node):
         self.recorder.tick(t, s.x, s.y, s.z, s.yaw, s.vx, s.vy, s.vz, s.roll, s.pitch,
                            float(new_force), new_throttle, new_roll_rate, new_pitch_rate, new_yaw_rate,
                            control_comp_time, self.wy, self.wz, plan, traj_idx)
+
+    def engage_backup(self, t: float, reason: str) -> None:
+        """Runtime-assurance fallback: hand the vehicle to PX4's LAND mode and stop issuing RTA commands."""
+        if self.backup_engaged is not None:
+            return
+        self.backup_engaged = reason
+        land(self)
+        self.recorder.event(t, 'backup_land', reason)
+        self.get_logger().warn(f"t={t:.2f} s: BACKUP -> LAND ({reason})")
 
     def update_lqr_feedback(self, sys, state, input, t: float): # sys kept for the original signature
             self.debug(f"{BANNER}UPDATING LQR")

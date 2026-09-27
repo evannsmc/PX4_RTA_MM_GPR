@@ -122,11 +122,12 @@ def u_applied(x, xref, uref, K_feedback, ulim):
  
 ## JIT: Collection idx function
 @jit
-def collection_id_jax(xref, xemb, threshold=0.3):
+def collection_id_jax(xref, xemb, threshold=0.3, z_max=jnp.inf):
     diff1 = jnp.abs(xref - xemb[:, :xref.shape[1]]) > threshold
     diff2 = jnp.abs(xref - xemb[:, xref.shape[1]:]) > threshold
     nan_mask = jnp.isnan(xref).any(axis=1) | jnp.isnan(xemb).any(axis=1)
-    fail_mask = diff1.any(axis=1) | diff2.any(axis=1) | nan_mask
+    ground = xemb[:, xref.shape[1] + 1] > z_max  # tube's lowest altitude (upper pz bound, NED) below the floor
+    fail_mask = diff1.any(axis=1) | diff2.any(axis=1) | nan_mask | ground
 
     # Safe handling using lax.cond
     return jax.lax.cond(
@@ -144,11 +145,16 @@ WY_INPUT_IDX = 1
 WZ_INPUT_IDX = 0
 
 
-def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des, div=50):
+def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des, div=50,
+               gp_feedforward=False):
     """Build the one-step update of the (embedding system, reference) pair.
 
     Shared by the full-horizon scan (jitted_rollout) and the early-exit loop
     (jitted_rollout_until_violation), so both compute identical rows.
+
+    gp_feedforward: add the GP mean disturbance's component along the thrust axis to the reference thrust,
+    u1 = M g + (wz cos(theta) - wy sin(theta)) - K (x - x_des). Without it the reference LQR (no integral action)
+    settles where K_pz * e = wz, e.g. 0.98 N / 0.32 N/m = 3 m short of the goal in SITL.
     """
     GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Y
     GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Z
@@ -199,12 +205,16 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
         error = xt_ref - xt_des  # error between the current rollout reference state and the desired state
         nominal = -K_reference @ error  # nominal input based on the reference state and feedback gain
 
-        uG = nominal + jnp.array([MASS * GRAVITY, 0.0])  # Add the gravitational force to the nominal input
-        u_ref_clipped = jnp.clip(uG, ulim.lower, ulim.upper)  # Clip the reference input to the input saturation limits
-
         ### Wind GP Interval Work (Y and Z directions computed together for efficiency)
         GP_mean_t_Y = GPY.mean(jnp.array([t, xt_ref[WY_INPUT_IDX]])).reshape(-1) # mean y-wind at the current time and altitude
         GP_mean_t_Z = GPZ.mean(jnp.array([t, xt_ref[WZ_INPUT_IDX]])).reshape(-1) # mean z-wind at the current time and lateral position
+
+        hover = MASS * GRAVITY
+        if gp_feedforward: # cancel the GP's mean disturbance along the thrust axis (see docstring)
+            theta = xt_ref[4]
+            hover = hover + GP_mean_t_Z[0] * jnp.cos(theta) - GP_mean_t_Y[0] * jnp.sin(theta)
+        uG = nominal + jnp.array([hover, 0.0])  # Add the gravitational (+ disturbance) force to the nominal input
+        u_ref_clipped = jnp.clip(uG, ulim.lower, ulim.upper)  # Clip the reference input to the input saturation limits
 
         MSY = sigma_wy_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1] # (1, 5) Jacobian bound of sigma^2 wrt x
         MSZ = sigma_wz_sq_jacM(irx.interval(0.), irx.ut2i(xt_emb))[1]
@@ -260,18 +270,21 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
     return step
 
 
-def _row_fails(xref_row, xemb_row, threshold):
-    """Same test as collection_id_jax, for one row: tube bound too far from the reference, or NaN."""
+def _row_fails(xref_row, xemb_row, threshold, z_max=jnp.inf):
+    """Same test as collection_id_jax, for one row: tube bound too far from the reference, NaN, or the tube's lowest
+    altitude (upper bound of pz in NED) below the floor z_max = -min_altitude."""
     n = xref_row.shape[0]
     return (jnp.any(jnp.abs(xref_row - xemb_row[:n]) > threshold)
             | jnp.any(jnp.abs(xref_row - xemb_row[n:]) > threshold)
-            | jnp.any(jnp.isnan(xref_row)) | jnp.any(jnp.isnan(xemb_row)))
+            | jnp.any(jnp.isnan(xref_row)) | jnp.any(jnp.isnan(xemb_row))
+            | (xemb_row[n + 1] > z_max))
 
 
 ## JIT: Rollout function (full horizon)
-@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.])):
-    step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des)
+@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys', 'gp_feedforward'])
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.]), gp_feedforward=False):
+    step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des,
+                      gp_feedforward=gp_feedforward)
     tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
 
     final_carry, (embedding_sys_traj, reference_traj, control_traj) = jax.lax.scan(step, (irx.i2ut(ix), xc), tt)
@@ -284,7 +297,8 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
 
 
 def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, x_des, *, n_steps, dt, perm,
-                            sys_mjacM, MASS, ulim, quad_sys, threshold, margin_steps):
+                            sys_mjacM, MASS, ulim, quad_sys, threshold, margin_steps, z_max=jnp.inf,
+                            gp_feedforward=False):
     """Early-exit rollout: integrate only until the tube first leaves the certification threshold, plus a margin.
 
     The scan is causal, so every computed row is IDENTICAL to the corresponding row of jitted_rollout and the
@@ -293,13 +307,14 @@ def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz,
 
     Returns: tube (n_steps+1, 10), ref (n_steps+1, 5), u (n_steps, 2), violation_idx (-1 if none), n_valid
     """
-    step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des)
+    step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des,
+                      gp_feedforward=gp_feedforward)
     x0_emb = irx.i2ut(ix)
     tube = jnp.full((n_steps + 1, x0_emb.shape[0]), jnp.nan).at[0].set(x0_emb)
     ref = jnp.full((n_steps + 1, xc.shape[0]), jnp.nan).at[0].set(xc)
     u = jnp.full((n_steps, 2), jnp.nan)
 
-    fail0 = _row_fails(xc, x0_emb, threshold)
+    fail0 = _row_fails(xc, x0_emb, threshold, z_max)
     viol0 = jnp.where(fail0, 0, -1)
     stop0 = jnp.where(fail0, margin_steps, n_steps)
 
@@ -313,7 +328,7 @@ def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz,
         tube = tube.at[i + 1].set(x_emb1)
         ref = ref.at[i + 1].set(x_ref1)
         u = u.at[i].set(u_i)
-        first_fail = (viol < 0) & _row_fails(x_ref1, x_emb1, threshold)
+        first_fail = (viol < 0) & _row_fails(x_ref1, x_emb1, threshold, z_max)
         viol = jnp.where(first_fail, i + 1, viol)
         stop = jnp.where(first_fail, jnp.minimum(i + 1 + margin_steps, n_steps), stop)
         return (i + 1, x_emb1, x_ref1, tube, ref, u, viol, stop)

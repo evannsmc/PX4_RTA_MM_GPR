@@ -5,6 +5,7 @@ project:
     - 01_ros2_multithreading.qmd
     - 02_rta_node_changes.qmd
     - 03_compilation_rollouts_wind.qmd
+    - 04_altitude_and_ground.qmd
 
 
 format:

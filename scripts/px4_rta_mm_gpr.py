@@ -85,6 +85,14 @@ def main():
                         help="NR tracker's y/z reference = RTA plan at t + T_lookahead (instead of y=0, z=-12.5+0.1t)")
     parser.add_argument("--nr-anti-windup", action=argparse.BooleanOptionalAction, default=True,
                         help="clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)")
+    parser.add_argument("--gp-feedforward", action=argparse.BooleanOptionalAction, default=True,
+                        help="reference thrust cancels the GP mean disturbance (removes the steady altitude offset)")
+    parser.add_argument("--min-altitude", type=float, default=0.3,
+                        help="certified tubes must stay this many metres above the ground (<= 0 disables)")
+    parser.add_argument("--backup", choices=['land', 'none'], default='land',
+                        help="what to do when no certified plan exists: PX4 LAND, or keep flying the expired plan")
+    parser.add_argument("--backup-grace", type=float, default=0.02,
+                        help="seconds a plan may be expired before the backup engages")
     parser.add_argument("--thrust-limits-mass-scaled", action=argparse.BooleanOptionalAction, default=True,
                         help="scale the RTA thrust limits [13, 21] N (tuned at 1.75 kg) with the vehicle mass")
     parser.add_argument("--entry-ramp", action=argparse.BooleanOptionalAction, default=False,
@@ -121,6 +129,10 @@ def main():
                              nr_ref_from_plan=args.nr_ref_from_plan,
                              entry_ramp=args.entry_ramp,
                              thrust_limits_mass_scaled=args.thrust_limits_mass_scaled,
+                             gp_feedforward=args.gp_feedforward,
+                             min_altitude=args.min_altitude,
+                             backup=args.backup,
+                             backup_grace=args.backup_grace,
                              ramp_speed_y=args.ramp_speed_y,
                              ramp_speed_z=args.ramp_speed_z,
                              verbose=args.verbose)

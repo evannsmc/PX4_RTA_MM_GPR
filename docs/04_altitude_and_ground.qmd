@@ -1,0 +1,127 @@
+---
+title: "Altitude offset and ground safety"
+subtitle: "Round 4 on the `multithreaded` branch: using the GP in the reference, and giving the certificate an unsafe set"
+date: 2026-09-27
+---
+
+# Summary
+
+* **Altitude offset (3 m) → fixed.** The reference thrust law ignored the disturbance the GP had
+  learned. Feeding the GP mean forward (`--gp-feedforward`) removes the offset.
+* **Ground → part of the certificate.** A plan is certified only while its *whole tube* stays at
+  least `--min-altitude` (0.3 m) above the ground. When no certified plan exists for longer than
+  `--backup-grace` (20 ms), the node hands the vehicle to PX4 **LAND** (`--backup land`).
+* **The sim-only `z + 0.5` adjustment is gone**; the controller uses PX4's altitude.
+* With an honest floor, the reference LQR's vertical under-damping became visible. It overshot the
+  old 0.6 m goal to about 0 m. At your choice, the goal is now **1.0 m** and
+  `Q_ref = diag(40, 10, 40, 40, 3)` (was `diag(40, 5, 40, 5, 3)`).
+
+# The altitude offset
+
+In steady state (three flights, $t > 30$ s): altitude 3.57 m against a 0.6 m goal, thrust
+18.6 N $= mg - 0.98$ N, and learned $\hat w_z = -0.98$ N. The *vehicle* was in equilibrium; the
+*reference* had stopped short. The rollout's reference input was
+
+$$u_1 = m g - K_\text{ref}\,(x - x_\text{goal}),$$
+
+with a $p_z$ gain of 0.32 N/m. In the reference dynamics
+$\dot v = g\cos\theta - \tfrac{w_y}{m}\sin\theta + \tfrac{w_z}{m}\cos\theta - \tfrac{u_1}{m}$, the
+equilibrium needs $u_1 = mg + w_z$ (at $\theta = 0$), so the LQR term must supply $w_z$ itself:
+$0.32\,e = 0.98$ gives $e = 3.0$ m (observed: 2.97 m). No integral action, no way to reach the goal.
+
+The GP already *knows* $w_z$; the reference just didn't use it. With `--gp-feedforward` (default on):
+
+$$u_1 = m g + \big(\hat w_z \cos\theta - \hat w_y \sin\theta\big) - K_\text{ref}\,(x - x_\text{goal}),$$
+
+i.e. the mean disturbance's component along the thrust axis is cancelled, and the LQR term only
+has to correct *errors*. $\hat w$ is the same GP mean the rollout already evaluates at each step,
+so this costs nothing extra.
+
+Where does a steady ~1 N "vertical wind" come from in SITL? The throttle-to-force map in
+`sim_utilities.py` disagrees with the simulated motors by about 5 %: the vehicle hovers at a
+commanded 18.6 N for a 19.6 N weight. The GP learns that model error as a disturbance, which is
+what it's for.
+
+# The ground
+
+## What was missing
+
+The certificate asked one question: *does the tube stay within 1 m of the reference?* A
+reference that descends through the ground, with a narrow tube around it, passes. Nothing encoded
+that the ground is unsafe.
+
+## The unsafe set in the certificate
+
+`_row_fails` (and `collection_id_jax`) now also fail a row when the tube's lowest altitude is below
+the floor. In NED that means the upper bound of $p_z$ above $-h_\text{min}$:
+
+```python
+(xemb_row[n + 1] > z_max)     # z_max = -min_altitude; xemb_row[n + 1] = upper bound of p_z
+```
+
+The certification point is the first row that fails *either* test. The early-exit rollout stops
+there, the safety horizon ends there, and pre-emptive replanning works as before. Offline, for a
+vehicle 0.6 m up and sinking at 1.5 m/s, certification now ends at the first row whose tube dips
+below 0.30 m (0.29 m; the row before is 0.31 m). Without the floor it certified down to 0.21 m.
+Early-exit and full rollouts still agree exactly.
+
+## The backup
+
+Runtime assurance needs a fallback for when *no* plan can be certified, for example because the
+vehicle is already too close to the ground for any tube to stay above the floor. Every control
+tick checks whether the current plan has expired. If the vehicle has been **continuously**
+without a certified plan for more than 20 ms, the node commands PX4 `NAV_LAND`, stops publishing
+RTA commands, and records an event in the flight log (`events/` in the HDF5 file, with the reason).
+
+"Continuously" matters. Near the floor, fresh plans certified for 0 s arrive every ~10 ms, so no
+*single* plan is ever more than ~10 ms past its expiry. The first version of the trigger compared
+against the current plan's expiry and never fired while the vehicle sat below the floor for 4 s.
+
+# Tuning the reference
+
+With the floor in place, all five flights with the old tuning were landed by the backup at about
+24 s. The logs show why: the *reference* passed the 0.6 m goal still descending at 0.37 m/s and
+bottomed out near the floor, and the vehicle followed it faithfully. Offline, from the logged state
+at 2.8 m sinking at 1.5 m/s:
+
+| goal | `Q_ref` (py, pz, h, v, θ) | lowest reference | settles at |
+|---|---|---|---|
+| 0.6 m | 40, 5, 40, 5, 3 (old) | −0.02 m | – |
+| 1.0 m | 40, 5, 40, 5, 3 | 0.25 m | – |
+| 0.6 m | 40, 5, 40, 40, 3 | 0.31 m | – |
+| 0.6 m | 40, 5, 40, 80, 3 | 0.53 m | 0.57 m |
+| **1.0 m** | **40, 10, 40, 40, 3** | **0.66 m** | **0.98 m** |
+
+The last row (your choice) leaves 0.36 m between the reference's lowest point and the floor for the
+tube.
+
+# Results
+
+Five SITL flights per tuning (events executor + process backend, all round-3 and round-4
+defaults), plus one negative test:
+
+| | goal 0.6 m, old `Q_ref` | **goal 1.0 m, new `Q_ref`** | negative test (floor 1.2 m) |
+|---|---|---|---|
+| completed the RTA phase | 0 / 5 (LAND at ~24 s) | **5 / 5** | – (LAND at 23.2 s, as intended) |
+| final altitude (goal) | – | **1.05–1.11 m** (1.00) | – |
+| lowest altitude | 0.30 m (at the floor) | **0.98–1.03 m** | 1.20 m (at the floor) |
+| lowest certified tube | 0.30 m | **0.85–0.89 m** | 1.20 m |
+| ticks without a certified plan | 0.2–0.3 % (the 20 ms grace) | **0.0 %** | 0.2 % |
+| control rate / max attitude | 100 Hz / 30–33° | 100 Hz / 31–36° | 100 Hz / 31° |
+
+In the negative test, certification failed exactly at the 1.2 m floor. The node commanded LAND
+20 ms later, and PX4 reported *Landing detected* and *Disarmed by landing*. The backup works
+end to end; it just isn't needed with the new tuning.
+
+![Altitude during the RTA phase (solid) and the lowest altitude of the tube row in use (dotted). Green dashed line: goal; red band: below the floor; ×: backup (LAND) engaged. (a) Old tuning: the reference overshoots the 0.6 m goal into the 0.3 m floor, and the backup lands every flight. (b) New tuning: the reference settles at the 1.0 m goal without overshoot, and the certified tube stays about 0.55 m above the floor. (c) With the floor deliberately set above the goal, certification fails at 1.2 m and the backup lands the vehicle.](figures/round4_altitude.pdf){#fig-r4}
+
+Per-tick data and backup events: `docs/data/round4/`.
+
+# Remaining caveats
+
+* The floor is relative to PX4's local origin (the take-off point). Over uneven ground, or with a
+  different take-off height, `--min-altitude` has to be interpreted accordingly; a range sensor would
+  make it absolute.
+* The backup is PX4's LAND. It assumes the ground below is clear; it is not itself certified.
+* Only the vertical direction has an unsafe set. Lateral obstacles would enter the same way, as extra
+  conditions in `_row_fails`.

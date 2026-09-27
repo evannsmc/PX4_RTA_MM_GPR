@@ -32,6 +32,8 @@ class FlightLog:
         self.plan_seqs = np.array(sorted(int(k) for k in self._f['plans'].keys()))
         self._plan_t_start = np.array([self._f['plans'][f'{s:05d}'].attrs['t_start'] for s in self.plan_seqs])
         self.timing = {k: self._f['timing'][k][()] for k in self._f['timing']} if 'timing' in self._f else {}
+        self.events = (pd.DataFrame({k: [_py(v) for v in self._f['events'][k][()]] for k in self._f['events']})
+                       if 'events' in self._f else pd.DataFrame(columns=['time', 'kind', 'detail']))
 
     def close(self):
         self._f.close()

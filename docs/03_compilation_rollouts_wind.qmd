@@ -213,6 +213,8 @@ Two other observations:
 
 ## Still open
 
+*Both items below are resolved in document 04 (GP-mean feedforward in the reference; a ground floor in the certificate with a LAND backup).*
+
 * With the NR fix, the vehicle settles around 3 m instead of at `GOAL_STATE` (0.6 m). Earlier
   flights settled at the same altitude after diving to the ground and back. The GP learns a
   steady ~1 N "vertical wind" (`wz`), which is really the throttle-to-force map disagreeing with

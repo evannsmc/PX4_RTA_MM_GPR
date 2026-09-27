@@ -97,6 +97,7 @@ class FlightRecorder:
         self.wind = ColumnBuffer(WIND_COLUMNS, 4096)
         self.gains = ColumnBuffer(GAIN_COLUMNS, 1024)
         self.plans: list = []            # RolloutPlan objects (immutable; stored by reference, no copy)
+        self.events: list = []           # (time, kind, detail) -- rare, e.g. the RTA backup engaging
         self._plans_lock = threading.Lock()
         self._last_tick_time = np.nan
 
@@ -120,6 +121,9 @@ class FlightRecorder:
 
     def gain_update(self, t, first_lqr: bool, K_feedback, K_reference) -> None:
         self.gains.append(t, float(first_lqr), *np.ravel(K_feedback), *np.ravel(K_reference))
+
+    def event(self, t: float, kind: str, detail: str = '') -> None:
+        self.events.append((float(t), str(kind), str(detail)))
 
     def add_plan(self, plan) -> None:
         with self._plans_lock:
@@ -152,6 +156,12 @@ class FlightRecorder:
                 for name in ('seq', 't_start', 'dt', 'collection_time', 'violation_idx', 'compute_time',
                              'latency', 'warmup'):
                     g.attrs[name] = getattr(plan, name)
+            g = f.create_group('events')
+            g.create_dataset('time', data=np.array([e[0] for e in self.events], dtype=float))
+            g.create_dataset('kind', data=np.array([e[1] for e in self.events], dtype=object),
+                             dtype=h5py.string_dtype())
+            g.create_dataset('detail', data=np.array([e[2] for e in self.events], dtype=object),
+                             dtype=h5py.string_dtype())
             if timing:
                 g = f.create_group('timing')
                 for name, values in timing.items():
