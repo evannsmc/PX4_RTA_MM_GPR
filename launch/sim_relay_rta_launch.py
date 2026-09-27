@@ -6,9 +6,11 @@ def generate_launch_description():
 
 
     full_state_relay = Node(
-        package='mocap_px4_relay',
+        package='mocap_px4_relays',
         executable='full_state_relay',
         output='screen',
+        # PX4 >= 1.16 publishes the versioned topic name; the relay still subscribes to the old one
+        remappings=[('/fmu/out/vehicle_local_position', '/fmu/out/vehicle_local_position_v1')],
     )
 
     rta_mm_gpr = Node(

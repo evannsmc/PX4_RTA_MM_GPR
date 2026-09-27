@@ -28,7 +28,10 @@ from px4_rta_mm_gpr.utilities import test_function, adjust_yaw
 
 import immrax as irx
 import jax.numpy as jnp
-from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
+try:
+    from ros2_logger import LogType, VectorLogType # ROS2Logger >= Mar 2026 (package renamed)
+except ImportError:
+    from Logger import LogType, VectorLogType # pyright: ignore[reportMissingImports]
 
 BANNER = '\n' + "==" * 30 + '\n'
 

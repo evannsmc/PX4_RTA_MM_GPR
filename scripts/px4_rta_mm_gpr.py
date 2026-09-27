@@ -7,7 +7,10 @@ import traceback
 import rclpy # Import ROS2 Python client library
 from .rta_mm_gpr_node import OffboardControl
 # from .test_node import TestNode as OffboardControl
-from Logger import Logger # type: ignore
+try:
+    from ros2_logger import Logger # ROS2Logger >= Mar 2026 (package renamed)
+except ImportError:
+    from Logger import Logger # type: ignore
 
 BANNER = "=" * 65
 
