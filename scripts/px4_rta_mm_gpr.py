@@ -73,6 +73,22 @@ def main():
                              "original behaviour, where the buffers were never updated)")
     parser.add_argument("--tube-horizon", type=float, default=30.0,
                         help="rollout horizon in seconds (default 30). Compute time scales linearly with it")
+    parser.add_argument("--tube-early-exit", action=argparse.BooleanOptionalAction, default=True,
+                        help="stop each rollout at its first certification violation + --tube-margin "
+                             "(identical plan rows, ~20x less compute)")
+    parser.add_argument("--tube-margin", type=float, default=0.5,
+                        help="seconds of plan kept past the violation, as a fallback if a replan is late")
+    parser.add_argument("--replan-lead", type=float, default=None,
+                        help="start the next rollout this many seconds before the plan expires "
+                             "(default: auto = 2x recent worst-case rollout latency)")
+    parser.add_argument("--nr-anti-windup", action=argparse.BooleanOptionalAction, default=True,
+                        help="clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)")
+    parser.add_argument("--thrust-limits-mass-scaled", action=argparse.BooleanOptionalAction, default=True,
+                        help="scale the RTA thrust limits [13, 21] N (tuned at 1.75 kg) with the vehicle mass")
+    parser.add_argument("--entry-ramp", action=argparse.BooleanOptionalAction, default=True,
+                        help="ramp the RTA goal from the entry position to GOAL_STATE at bounded speed")
+    parser.add_argument("--ramp-speed-y", type=float, default=0.5, help="lateral goal ramp speed (m/s)")
+    parser.add_argument("--ramp-speed-z", type=float, default=1.0, help="vertical goal ramp speed (m/s)")
     parser.add_argument("--gc-freeze", action=argparse.BooleanOptionalAction, default=True,
                         help="gc.freeze() after initialisation so garbage collection pauses stay short")
     parser.add_argument("--gc-no-full", action=argparse.BooleanOptionalAction, default=True,
@@ -95,6 +111,14 @@ def main():
                              gc_freeze=args.gc_freeze,
                              gc_no_full=args.gc_no_full,
                              tube_horizon=args.tube_horizon,
+                             tube_early_exit=args.tube_early_exit,
+                             tube_margin=args.tube_margin,
+                             replan_lead=args.replan_lead,
+                             nr_anti_windup=args.nr_anti_windup,
+                             entry_ramp=args.entry_ramp,
+                             thrust_limits_mass_scaled=args.thrust_limits_mass_scaled,
+                             ramp_speed_y=args.ramp_speed_y,
+                             ramp_speed_z=args.ramp_speed_z,
                              verbose=args.verbose)
 
     rclpy.init()

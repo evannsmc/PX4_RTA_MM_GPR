@@ -145,8 +145,10 @@ class FlightRecorder:
                 g = plans.create_group(f'{plan.seq:05d}')
                 for name in ('reachable_tube', 'rollout_ref', 'feedfwd_input'):
                     g.create_dataset(name, data=getattr(plan, name), **comp)
-                for name in ('state0', 'K_feedback', 'K_reference', 'obs_wy', 'obs_wz'):
-                    g.create_dataset(name, data=np.asarray(getattr(plan, name)))
+                for name in ('state0', 'K_feedback', 'K_reference', 'obs_wy', 'obs_wz', 'goal'):
+                    value = getattr(plan, name, None)
+                    if value is not None:
+                        g.create_dataset(name, data=np.asarray(value))
                 for name in ('seq', 't_start', 'dt', 'collection_time', 'violation_idx', 'compute_time',
                              'latency', 'warmup'):
                     g.attrs[name] = getattr(plan, name)

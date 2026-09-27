@@ -11,6 +11,7 @@ from .TVGPR import(
 from . import mm_rta as mm_rta
 from .mm_rta import(
     jitted_rollout,
+    rollout_until_violation,
     u_applied,
     get_gp_mean,
     collection_id_jax,
@@ -23,6 +24,7 @@ __all__ = [
     'GPR',
     'TVGPR',
     'jitted_rollout',
+    'rollout_until_violation',
     'u_applied',
     'get_gp_mean',
     'collection_id_jax',
