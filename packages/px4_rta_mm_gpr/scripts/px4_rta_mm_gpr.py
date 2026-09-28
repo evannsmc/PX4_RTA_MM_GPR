@@ -129,6 +129,8 @@ def main():
     parser.add_argument("--gc-no-full", action=argparse.BooleanOptionalAction, default=True,
                         help="disable automatic full (gen-2) garbage collections during flight (they stall "
                              "every thread for ~300 ms); a full collection still runs at shutdown")
+    parser.add_argument("--cpp-control", action=argparse.BooleanOptionalAction, default=False,
+                        help="planner only: the C++ rta_fast_loop node owns PX4 I/O and the 100 Hz control law")
     parser.add_argument("--log-autosave", type=float, default=5.0,
                         help="flush the flight log to disk every N seconds during flight (0: only at shutdown)")
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=False,
@@ -169,7 +171,8 @@ def main():
                              backup_grace=args.backup_grace,
                              ramp_speed_y=args.ramp_speed_y,
                              ramp_speed_z=args.ramp_speed_z,
-                             verbose=args.verbose)
+                             verbose=args.verbose,
+                             cpp_control=args.cpp_control)
 
     rclpy.init()
     offboard_control = OffboardControl(sim, options)
