@@ -413,7 +413,7 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 ## Standard library
 
 | import | what it is | used for |
-|----------|-------|-----------|
+|-------------|------|---------|
 | `os` | operating-system interface | paths, `makedirs`, environment (`PX4_RTA_JAX_CACHE`), `sched_setaffinity` (worker CPUs) |
 | `sys` | interpreter access | `sys.argv` for the command line |
 | `time` | clocks | `time.time()` (node clock, latencies), `perf_counter()` (compute times, compile times) |
@@ -435,7 +435,7 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 ## ROS 2
 
 | import | what it is | used for |
-|----------|-------|-----------|
+|-------------|------|---------|
 | `rclpy` | the ROS 2 Python client library | `init`, `ok`, `shutdown` |
 | `Node` (`rclpy.node`) | base class of a node | `OffboardControl` subclasses it: publishers, subscriptions, timers, logger |
 | `MutuallyExclusiveCallbackGroup` (`rclpy.callback_groups`) | callback groups | the five groups above |
@@ -449,7 +449,7 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 ## Numerics and control
 
 | import | what it is | used for |
-|----------|-------|-----------|
+|-------------|------|---------|
 | `numpy` | arrays | everything outside compiled code: states, buffers, the EKF, logging, canonical `float64` arguments |
 | `jax`, `jax.numpy as jnp` | NumPy-like arrays + tracing + XLA compilation + automatic differentiation | the model, GPs, rollout, NR tracker; `jax.jit(...).lower(...).compile()`, `ShapeDtypeStruct`, `jacfwd`, `vmap`, `config` |
 | `jax.lax` (`scan`, `while_loop`, `fori_loop`, `cond`) | structured control flow that stays inside the compiled program | the full-horizon rollout, the early-exit rollout, NR's prediction loop, the certificate test |
@@ -461,7 +461,7 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 ## Data, plots and video
 
 | import | what it is | used for |
-|----------|-------|-----------|
+|-------------|------|---------|
 | `flight_recorder`: `Recorder`, `ColumnBuffer`, `git_commit` | this project's logging library (submodule) | preallocated streams, records, events, HDF5 flushing, autosave |
 | `h5py` (inside `flight_recorder` and the reader) | HDF5 files | the flight log |
 | `pandas` | data frames | log tables (`log.ticks`), summaries |
