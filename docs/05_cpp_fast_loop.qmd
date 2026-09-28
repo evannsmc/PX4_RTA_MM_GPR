@@ -1,6 +1,6 @@
 ---
 title: "The C++ fast loop"
-subtitle: "Branch `cpp-fast-loop`: PX4 I/O, the 100 Hz control law and the runtime-assurance watchdog in C++; rollouts, GP and wind estimation stay in Python"
+subtitle: "Branch `cpp-version` (= `main` + this layer): PX4 I/O, the 100 Hz control law and the runtime-assurance watchdog in C++; rollouts, GP and wind estimation stay in Python"
 date: 2026-09-28
 ---
 
@@ -35,8 +35,8 @@ anti-windup bound, NR parameters, mission times, backup policy) arrives in `Plan
 fast loop has no duplicated configuration, and it does not start the mission before the planner is
 alive and compiled. That is the same "T0 after compilation" rule the single-process node had.
 
-**Packages.** colcon never looks for packages inside another package's directory, so the
-repository became a multi-package repository on this branch (`git mv`, history preserved):
+**Packages.** The repository is multi-package (on `main` too, because colcon never looks for packages inside
+another package's directory); this branch adds the two C++-side packages:
 
 ```text
 PX4_RTA_MM_GPR/

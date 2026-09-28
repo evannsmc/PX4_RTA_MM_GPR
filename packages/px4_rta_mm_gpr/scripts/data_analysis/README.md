@@ -15,7 +15,8 @@ notebook stays a few lines per figure. Figures go to `figures/` (PDF with TrueTy
 `pip install imageio-ffmpeg` (it bundles ffmpeg).
 
 **Data.**
-* `log_files/sitl/`: an example SITL flight of the current code (HDF5, flight_recorder layout). Your own runs are
+* `log_files/sitl/`: example SITL flights of the current code (HDF5, flight_recorder layout): the Python loop and,
+  on this branch, the C++ fast loop (`sitl_cpp_loop_*.h5`; the planner logs the fast loop's ticks in the same layout). Your own runs are
   written by the node to `<workspace>/src/data_analysis/log_files/px4_rta_mm_gpr/<name>.h5`; point `LOGS` in a
   notebook at them.
 * `log_files/comparison/`: data of notebook 05: `sitl/cmp_{A..F}_{1,2,3}.h5` (18 PX4 SITL flights, δ = 0),

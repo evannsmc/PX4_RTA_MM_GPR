@@ -11,7 +11,7 @@ from px4_msgs.msg import(
     VehicleOdometry, VehicleLocalPosition, # state (100 Hz odometry + 50 Hz acceleration), straight from PX4
     RcChannels
 )
-try: # only needed with --cpp-control (branch cpp-fast-loop)
+try: # only needed with --cpp-control (branch cpp-version)
     from px4_rta_mm_gpr_msgs.msg import PlannerStatus, RtaPlan, RtaGains, ControlTick
 except ImportError:
     PlannerStatus = RtaPlan = RtaGains = ControlTick = None
@@ -408,7 +408,7 @@ class OffboardControl(Node):
             # publishes its mission clock + tunables, every installed plan and every gain update, and logs the fast
             # loop's ControlTicks into the same flight recorder.
             if ControlTick is None:
-                raise RuntimeError("--cpp-control needs the px4_rta_mm_gpr_msgs package (branch cpp-fast-loop)")
+                raise RuntimeError("--cpp-control needs the px4_rta_mm_gpr_msgs package (branch cpp-version)")
             reliable = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
             self.status_pub = self.create_publisher(PlannerStatus, '/rta/planner_status', reliable)
             self.plan_pub = self.create_publisher(RtaPlan, '/rta/plan', reliable)

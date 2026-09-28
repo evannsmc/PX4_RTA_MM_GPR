@@ -92,9 +92,26 @@ Reproduce: `--gp tv|static --embedding uw|u|none --model-mismatch-margin 0.05` (
 
 | branch | what it is |
 |---|---|
-| **`main`** | the multithreaded Python node (this README) |
-| **`cpp-version`** | `main` + a C++ fast loop: PX4 I/O, the 100 Hz control law and the certification watchdog in C++, with this Python node as the planner. Same features and tuning; faster and isolated by construction |
+| **`main`** | the multithreaded Python node |
+| **`cpp-version`** (this branch) | `main` + a C++ fast loop: PX4 I/O, the 100 Hz control law and the certification watchdog in C++, with this Python node as the planner. Same features and tuning; faster and isolated by construction |
 | tags `archive/*` | earlier branches, kept for reference: `archive/main-2026-05-02` (the single-threaded code the paper's hardware experiments were flown with), `archive/multithreaded`, `archive/cpp-fast-loop`, `archive/working_z`, `archive/working_last_y` |
+
+## The C++ fast loop (this branch)
+
+`cpp-version` is exactly `main` plus one layer (a single commit, so `main` merges into it cleanly):
+
+* `packages/px4_rta_mm_gpr_cpp/`: **`rta_fast_loop`**, which owns everything PX4 sees: heartbeat, arming and
+  modes, the 100 Hz control law (NR tracker with an exact dual-number Jacobian + RTA feedback, matching the Python/JAX
+  kernels to ~1e-13) and the certification watchdog (PX4 LAND when no certified plan exists). It computes a control
+  tick in about 4 µs and holds a 10.04 ms p99 period. It also lands the vehicle by itself if the planner dies.
+* `packages/px4_rta_mm_gpr_msgs/`: `PlannerStatus` (mission clock + every tunable: one source of truth),
+  `RtaPlan`, `RtaGains`, `ControlTick`.
+* The Python node with `--cpp-control` becomes the **planner**: rollouts, GP, wind EKF, LQR gains, and logging
+  of every `ControlTick` into the same flight log.
+
+```bash
+ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py      # relay + rta_fast_loop + planner
+```
 
 ## What the node does
 
@@ -124,7 +141,9 @@ packages/
     px4_rta_mm_gpr/         library: jax_mm_rta (model, GP, rollouts), jax_nr, concurrency, control_kernels,
                             flight_log, sim (numerical simulation), analysis (log analysis)
     scripts/                the node (rta_mm_gpr_node.py, px4_rta_mm_gpr.py) and data_analysis/ (notebooks)
-    launch/                 sim_rta_launch.py
+    launch/                 sim_rta_launch.py, cpp_rta_launch.py
+  px4_rta_mm_gpr_cpp/       rta_fast_loop (C++), control_law.hpp, control_law_check, test/
+  px4_rta_mm_gpr_msgs/      PlannerStatus, RtaPlan, RtaGains, ControlTick
   flight_recorder/          git submodule: flight-data logging library
 tools/run_sitl.sh           PX4 SITL with this project's parameters
 ```
@@ -140,7 +159,8 @@ source install/setup.bash
 
 PX4_RTA_MM_GPR/tools/run_sitl.sh                 # terminal 1: PX4 SITL + Gazebo x500 (HEADLESS=1 for no window)
 MicroXRCEAgent udp4 -p 8888                      # terminal 2
-ros2 launch px4_rta_mm_gpr sim_rta_launch.py         # terminal 3 (or: ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --sim --log-file run.log)
+ros2 launch px4_rta_mm_gpr cpp_rta_launch.py         # terminal 3: C++ fast loop + Python planner
+# (Python-only, as on main: ros2 launch px4_rta_mm_gpr sim_rta_launch.py)
 ```
 
 `ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --help` lists every option. The recommended configuration is
@@ -170,7 +190,7 @@ timing, tubes, videos of every plan's reachable tube with the GPs, numerical stu
 3. `03_compilation_rollouts_wind.pdf`: AOT compilation, early-exit rollouts, wind estimation, what caused the
    crashes
 4. `04_altitude_and_ground.pdf`: GP feedforward (altitude offset), ground floor in the certificate, LAND backup
+5. `05_cpp_fast_loop.pdf`: the C++ fast loop: architecture, messages, dual-number Jacobian, equivalence with the
+   Python kernels, SITL results, planner-killed test
 6. `06_fixes_and_comparison.pdf`: five model fixes (feedback sign, Jacobian domain, row lookup, body-frame
    velocities, 100 Hz state) and the TV-GPR / GPR × embedding-system comparison
-
-The C++ fast loop is documented on the `cpp-version` branch (`docs/_output/05_cpp_fast_loop.pdf`).
