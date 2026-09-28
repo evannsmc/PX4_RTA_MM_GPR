@@ -1,6 +1,6 @@
 ---
 title: "Altitude offset and ground safety"
-subtitle: "Round 4 on the `multithreaded` branch: using the GP in the reference, and giving the certificate an unsafe set"
+subtitle: "Round 4 (branch `main`): using the GP in the reference, and giving the certificate an unsafe set"
 date: 2026-09-27
 ---
 

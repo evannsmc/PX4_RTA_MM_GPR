@@ -1,6 +1,6 @@
 ---
 title: "Compilation, early-exit rollouts and wind estimation"
-subtitle: "Round 3 on the `multithreaded` branch: making every in-flight computation predictable, and finding what actually crashes the vehicle"
+subtitle: "Round 3 (branch `main`): making every in-flight computation predictable, and finding what actually crashes the vehicle"
 date: 2026-09-27
 ---
 
@@ -91,7 +91,9 @@ first violation. Both versions call the *same* step function (`_make_step`), and
 causal, so:
 
 * every computed row is **bit-identical** to the full rollout (`np.array_equal` on six plans taken
-  from a logged flight);
+  from a logged flight, in this round's configuration; with round 4's ground floor and GP feedforward, XLA fuses
+  the two loops differently and they agree to about $10^{-14}$ with identical plan decisions, see
+  `data_analysis/04_numerical_sim.ipynb`);
 * the violation index is identical;
 * the cost is proportional to (violation + margin), not the horizon: **3–4 ms instead of
   62–108 ms** on this machine, and the horizon (`--tube-horizon`) becomes just an upper bound.
@@ -224,6 +226,8 @@ Two other observations:
 * The certificate compares the tube with the *reference* only; nothing checks the ground.
 
 # Should the fast loop move to C++?
+
+*This split now exists: branch `cpp-version` (document 05 there).*
 
 **Not for this problem.** Every configuration in the ablation already held 100 Hz with an 11–13 ms
 p99 period, 0 % certification gaps and a 31 µs control computation, and the upsets came from the

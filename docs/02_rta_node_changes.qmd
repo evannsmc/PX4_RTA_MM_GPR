@@ -1,6 +1,6 @@
 ---
 title: "The multithreaded RTA-MM-GPR node"
-subtitle: "What changed on the `multithreaded` branch, how to run it, and what it measured"
+subtitle: "What changed relative to the original single-threaded node (tag `archive/main-2026-05-02`), how to run it, and what it measured"
 date: 2026-09-27
 ---
 
@@ -9,7 +9,7 @@ date: 2026-09-27
 The node's control loop used to share one thread with the reachability rollouts, a stop-the-world
 garbage collector, in-flight JIT compilation, and hundreds of `print`s per second. On this machine
 that meant **6–12 Hz instead of 100 Hz** during the RTA phase, and every original flight in the
-benchmark crashed. On the `multithreaded` branch:
+benchmark crashed. In the current code (branch `main`):
 
 * the control law, rollouts, estimation, odometry and PX4 I/O run in **separate callback groups**
   on a **`MultiThreadedExecutor`** (or, optionally, the rollout runs in its **own process**);
@@ -212,7 +212,7 @@ exactly as before.
 
 # The new flight recorder
 
-> **Update (branch `cpp-fast-loop`):** the generic part of this recorder is now the standalone library
+> **Update (branches `main` and `cpp-version`):** the generic part of this recorder is now the standalone library
 > [flight_recorder](https://github.com/evannsmc/flight_recorder), included as a git submodule in
 > `packages/flight_recorder`. `px4_rta_mm_gpr/flight_log/` is a thin RTA-specific layer on top of it: the tick,
 > wind and gain columns, the plan records, the legacy CSV and the tube helpers. Files now use the library's layout
