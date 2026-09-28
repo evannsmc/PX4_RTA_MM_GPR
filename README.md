@@ -84,6 +84,8 @@ timing, tubes, videos of every plan's reachable tube with the GPs, numerical stu
 
 ## Documentation (`docs/_output/`)
 
+0. **`00_package_guide.pdf` (start here)**: how the package is laid out and how its parts connect, ahead-of-time
+   JAX compilation, the threads / processes / locks, and every import explained
 1. `01_ros2_multithreading.pdf`: concurrency in ROS 2 / Python (executors, callback groups, GIL, processes, GC
    and JIT stalls)
 2. `02_rta_node_changes.pdf`: the multithreaded node, its options, benchmarks, flight recorder

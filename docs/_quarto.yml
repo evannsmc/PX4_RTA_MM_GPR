@@ -2,6 +2,7 @@ project:
   type: default
   output-dir: _output
   render:
+    - 00_package_guide.qmd
     - 01_ros2_multithreading.qmd
     - 02_rta_node_changes.qmd
     - 03_compilation_rollouts_wind.qmd
