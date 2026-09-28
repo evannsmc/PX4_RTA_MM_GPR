@@ -19,7 +19,8 @@ notebook stays a few lines per figure. Figures go to `figures/` (PDF with TrueTy
 * `log_files/numerical/`: written by `04_numerical_sim.ipynb` (same layout as a flight, so 01-03 work on them too).
 * `log_files/hardware/`: the paper's hardware flights, recorded with the **previous version of the code** (tag
   `archive/main-2026-05-02`); kept as recorded, see its README.
-* `legacy/`: the previous notebooks and SITL logs (old CSV layout), kept for reference; see its README.
+* The previous analysis notebooks and SITL logs (old CSV layout) are not on this branch; they are in tag
+  `archive/main-2026-05-02` under `scripts/data_analysis/`.
 
 **Running.** From a sourced workspace (`source install/setup.bash`), start Jupyter in this directory. To re-run all
 notebooks non-interactively:

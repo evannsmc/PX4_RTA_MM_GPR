@@ -72,7 +72,6 @@ unless you ask for it.
 * `immrax` 0.3.x pins `numpy~=2.3`, but ROS 2 Jazzy's message bindings are built against Ubuntu's
   numpy 1.26. `immrax` is installed with `--no-deps` and its other dependencies with numpy pinned
   at 1.26.4 (all in `~/.local`). `scipy>=1.14` is needed for `Rotation.from_quat(..., scalar_first=True)`.
-* ROS2Logger renamed its package `Logger` → `ros2_logger`; both are accepted.
 
 # Architecture
 
@@ -231,8 +230,8 @@ exactly as before.
   buffers), so any plan can be recomputed offline with `RolloutEngine`.
 * **At shutdown:** one HDF5 file (gzip + shuffle; about 3 MB for a flight with 82 plans) and a CSV
   in the exact ROS2Logger column layout, reconstructed from the stored plans, so the existing
-  notebooks keep working. ROS2Logger is still used to choose the output directory and to copy its
-  notebooks.
+  notebooks keep working. The node no longer depends on ROS2Logger: it writes to
+  `<workspace>/src/data_analysis/log_files/px4_rta_mm_gpr/<name>.h5` (the directory ROS2Logger used).
 
 ```text
 flight.h5

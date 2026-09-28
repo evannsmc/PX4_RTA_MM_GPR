@@ -7,16 +7,23 @@ import traceback
 import rclpy # Import ROS2 Python client library
 from rclpy.executors import SingleThreadedExecutor, MultiThreadedExecutor
 from .rta_mm_gpr_node import OffboardControl, RuntimeOptions
-# from .test_node import TestNode as OffboardControl
-try: # ROS2Logger is only used to pick the log directory (and to copy its analysis notebooks there)
-    from ros2_logger import Logger # ROS2Logger >= Mar 2026 (package renamed)
-except ImportError:
-    try:
-        from Logger import Logger # type: ignore
-    except ImportError:
-        Logger = None
 
 BANNER = "=" * 65
+
+
+def default_log_path(filename):
+    """<workspace>/src/data_analysis/log_files/px4_rta_mm_gpr/<filename> for a node run from a colcon workspace
+    (build/ or install/), else ./flight_logs/<filename>. The directory is created."""
+    parts = os.path.abspath(__file__).split(os.sep)
+    marks = [i for i, p in enumerate(parts) if p in ('build', 'install')]
+    if marks:
+        base = os.path.join(os.sep.join(parts[:marks[0]]) or os.sep, 'src', 'data_analysis', 'log_files',
+                            'px4_rta_mm_gpr')
+    else:
+        base = os.path.join(os.getcwd(), 'flight_logs')
+    path = os.path.join(base, filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
 
 
 def parse_cpu_list(text):
@@ -112,9 +119,8 @@ def main():
     args, unknown = parser.parse_known_args(sys.argv[1:])
     print(f"Arguments: {args}, Unknown: {unknown}")
     sim = args.sim  # already a bool
-    filename = args.log_file
-    base_path = os.path.dirname(os.path.abspath(__file__))  # Get the script's directory
-    print(f"{sim=}, {filename=}, {base_path=}")
+    log_path = default_log_path(args.log_file)
+    print(f"{sim=}, log: {log_path}")
     print(f"{'SIMULATION' if sim else 'HARDWARE'}")
 
     options = RuntimeOptions(executor=args.executor,
@@ -143,7 +149,6 @@ def main():
     offboard_control = OffboardControl(sim, options)
     executor = make_executor(args.executor, args.threads or offboard_control.num_callback_groups)
     executor.add_node(offboard_control)
-    logger = None
 
 
     def shutdown_logging(*args):
@@ -151,7 +156,6 @@ def main():
 
         try:
             offboard_control.close() # stop the rollout worker process (if any), print timing summary
-            log_path = logger.full_path if logger else os.path.join(os.getcwd(), 'flight_logs', filename)
             offboard_control.save_flight_log(log_path) # <name>.h5 + legacy <name>.csv
             offboard_control.destroy_node()
         except Exception as e:
@@ -172,8 +176,6 @@ def main():
 
     try:
         print(f"{BANNER}\nInitializing ROS 2 node ({type(executor).__name__})\n{BANNER}")
-        logger = Logger(filename, base_path) if Logger else None
-        log_path = logger.full_path if logger else os.path.join(os.getcwd(), 'flight_logs', filename)
         if args.log_autosave > 0: # crash tolerance: a crash loses at most this many seconds of the flight log
             offboard_control.recorder.start_autosave(log_path, args.log_autosave)
         executor.spin()
