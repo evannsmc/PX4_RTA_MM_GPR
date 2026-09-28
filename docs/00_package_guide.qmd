@@ -491,6 +491,86 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 `from px4_rta_mm_gpr.jax_mm_rta import *` and `from px4_rta_mm_gpr.px4_functions import *` in the node are
 the two star imports left from the original code; `__all__` in each `__init__.py` lists what they bring in.
 
+# On `cpp-version`: the C++ fast loop
+
+This branch is `main` plus one layer: the time-critical half of the node moves to C++, and the Python node
+becomes the **planner**. Doc 05 has the design and the measurements; this section shows how it fits into
+the structure above.
+
+**Two more packages** (next to the others in `packages/`):
+
+```text
+px4_rta_mm_gpr_msgs/   PlannerStatus, RtaPlan, RtaGains, ControlTick
+px4_rta_mm_gpr_cpp/    rta_fast_loop, control_law.hpp, control_law_check
+```
+
+Both are `ament_cmake` packages.
+
+**Two processes.** `ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py` starts the relay, `rta_fast_loop`
+and `px4_rta_mm_gpr --cpp-control`:
+
+| process | owns |
+|-----|--------------|
+| `rta_fast_loop` (C++) | everything PX4 sees: heartbeat, offboard/arm, odometry, the 100 Hz control law (NR tracker with an exact dual-number Jacobian + RTA feedback), the certification watchdog and LAND backup |
+| `px4_rta_mm_gpr --cpp-control` (Python) | the mission clock and every tunable, rollouts (thread or worker process), wind EKF and GP data, LQR gains, the flight log |
+
+**Topics between them** (reliable QoS):
+
+| topic | message | direction | rate |
+|----|-----|----|----|
+| `/rta/planner_status` | `PlannerStatus`: mission $t_0$, mass, limits, NR parameters, phase times, backup settings | planner → fast loop | 10 Hz; the first one configures the fast loop |
+| `/rta/plan` | `RtaPlan`: seq, $t_0$, dt, `collection_time`, violation row, reference and feedforward rows | planner → fast loop | every installed plan |
+| `/rta/gains` | `RtaGains`: the 2×5 feedback gain | planner → fast loop | every LQR update |
+| `/rta/control_tick` | `ControlTick`: state, command, plan row, timing, phase, backup | fast loop → planner | 100 Hz; logged into the same HDF5 file |
+
+**Threads and snapshots in C++.** `rta_fast_loop` uses a `MultiThreadedExecutor` with two
+mutually exclusive groups: subscriptions in one, the control and heartbeat timers in the other, so
+deserialising a plan never delays a tick. It uses the same build-then-publish pattern as the Python node,
+with a type that makes it explicit:
+
+```cpp
+std::atomic<std::shared_ptr<const Plan>> plan_;   // C++20
+
+// subscription thread (writer)
+auto p = std::make_shared<Plan>(/* complete */);
+plan_.store(p);                                   // publish
+
+// control thread (reader)
+const auto plan = plan_.load();                   // ONE snapshot
+const auto row = plan->ref_row(plan->index_at(t));
+```
+
+`shared_ptr` keeps a plan alive while any thread still uses it (no reader can see it freed), and `const`
+makes it immutable. The flags (`nav_state_`, `armed_`, `rc_offboard_`) are `std::atomic` scalars. One
+ordering detail: on the first `PlannerStatus`, the derived constants (limits, NR parameters) are written
+*before* `config_.store(msg)`; the control timer does nothing until it loads a non-null `config_`, and the
+atomic store/load pair guarantees it then sees those constants.
+
+**The planner side** (`rta_mm_gpr_node.py` with `--cpp-control`): the PX4 publishers and the control and
+heartbeat timers are not created. Instead: a 10 Hz `planner_status_callback` (px4_io group),
+`publish_plan` in `install_plan` and `publish_gains` in the LQR update, and `control_tick_callback`
+(control group), which logs each tick and feeds `LoopStats.record()` with the fast loop's measured period and
+compute time. Rollouts, AOT compilation, the executors and every lock described above are unchanged.
+
+**C++ includes** (`rta_fast_loop.cpp`, `control_law.hpp`):
+
+| include | what it is | used for |
+|-------------|------|---------|
+| `rclcpp/rclcpp.hpp` | the ROS 2 C++ client library | node, publishers, subscriptions, wall timers, callback groups, `MultiThreadedExecutor` |
+| `px4_msgs/msg/*.hpp` | PX4 message types | offboard mode, vehicle command, setpoints, vehicle status, RC |
+| `mocap_msgs/msg/full_state.hpp` | the relay's message | odometry |
+| `px4_rta_mm_gpr_msgs/msg/*.hpp` | this project's messages | the four topics above |
+| `Eigen/Dense` | linear-algebra templates | fixed-size vectors and matrices in the control law |
+| `<atomic>`, `<memory>` | atomics, smart pointers | `std::atomic<std::shared_ptr<const T>>` snapshots |
+| `<chrono>` | clocks | mission clock (system clock, as the planner), compute time (steady clock) |
+| `<optional>` | a value or nothing | `uncertified_since_` (the watchdog's start time) |
+| `<cmath>`, `<limits>`, `<array>`, `<algorithm>` | math, infinities, fixed arrays, `clamp` | the control law and limits |
+
+`control_law.hpp` also defines `Jet<N>`, a dual number (value + gradient): running the NR predictor on
+`Jet<4>` values gives the prediction and its exact Jacobian with respect to the 4 inputs in one pass, the
+C++ counterpart of `jax.jacfwd`. `control_law_check` + `test/test_control_law.py` compare it with the JAX
+kernels on 500 random cases.
+
 # Where to change what
 
 | to … | change |
