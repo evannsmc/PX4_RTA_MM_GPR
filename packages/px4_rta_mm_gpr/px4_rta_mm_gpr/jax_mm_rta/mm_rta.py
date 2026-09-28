@@ -121,10 +121,17 @@ def u_applied(x, xref, uref, K_feedback, ulim):
     return u_clipped
  
 ## JIT: Collection idx function
+# The certificate is SPATIAL: a row fails when the tube's position bounds (py, pz) are more than `threshold` (m) from
+# the reference position, or the tube reaches the floor. Velocity and attitude bounds are not limited (a NaN in any
+# state still fails: the rollout broke down).
+SPATIAL = 2   # the first two states, py and pz
+
+
 @jit
-def collection_id_jax(xref, xemb, threshold=0.3, z_max=jnp.inf):
-    diff1 = jnp.abs(xref - xemb[:, :xref.shape[1]]) > threshold
-    diff2 = jnp.abs(xref - xemb[:, xref.shape[1]:]) > threshold
+def collection_id_jax(xref, xemb, threshold=0.5, z_max=jnp.inf):
+    n = xref.shape[1]
+    diff1 = jnp.abs(xref[:, :SPATIAL] - xemb[:, :SPATIAL]) > threshold
+    diff2 = jnp.abs(xref[:, :SPATIAL] - xemb[:, n:n + SPATIAL]) > threshold
     nan_mask = jnp.isnan(xref).any(axis=1) | jnp.isnan(xemb).any(axis=1)
     ground = xemb[:, xref.shape[1] + 1] > z_max  # tube's lowest altitude (upper pz bound, NED) below the floor
     fail_mask = diff1.any(axis=1) | diff2.any(axis=1) | nan_mask | ground
@@ -271,11 +278,11 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
 
 
 def _row_fails(xref_row, xemb_row, threshold, z_max=jnp.inf):
-    """Same test as collection_id_jax, for one row: tube bound too far from the reference, NaN, or the tube's lowest
-    altitude (upper bound of pz in NED) below the floor z_max = -min_altitude."""
+    """Same test as collection_id_jax, for one row: a position bound (py, pz) too far from the reference position,
+    NaN, or the tube's lowest altitude (upper bound of pz in NED) below the floor z_max = -min_altitude."""
     n = xref_row.shape[0]
-    return (jnp.any(jnp.abs(xref_row - xemb_row[:n]) > threshold)
-            | jnp.any(jnp.abs(xref_row - xemb_row[n:]) > threshold)
+    return (jnp.any(jnp.abs(xref_row[:SPATIAL] - xemb_row[:SPATIAL]) > threshold)
+            | jnp.any(jnp.abs(xref_row[:SPATIAL] - xemb_row[n:n + SPATIAL]) > threshold)
             | jnp.any(jnp.isnan(xref_row)) | jnp.any(jnp.isnan(xemb_row))
             | (xemb_row[n + 1] > z_max))
 

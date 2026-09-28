@@ -42,7 +42,7 @@ class RolloutConfig:
     ulim_upper: tuple
     goal_state: tuple             # (py, pz, h, v, theta)
     x_pert: tuple                 # half-widths of the initial state interval
-    collection_threshold: float   # tube-vs-reference deviation that ends the safety horizon
+    collection_threshold: float   # tube-vs-reference position deviation (m, py and pz) that ends the safety horizon
     n_obs: int = 9                # rows in each GP data buffer
     early_exit: bool = True       # stop integrating at the first violation + margin_steps
     margin_steps: int = 50        # rows kept past the violation (fallback reference if a replan is late)
@@ -70,7 +70,7 @@ class RolloutResult:
     reachable_tube: np.ndarray    # (N+1, 10) lower/upper embedding states
     rollout_ref: np.ndarray       # (N+1, 5) reference trajectory
     feedfwd_input: np.ndarray     # (N, 2) feedforward inputs
-    violation_idx: int            # first index where tube deviates > threshold, -1 if none
+    violation_idx: int            # first index where the tube's position deviates > threshold, -1 if none
     compute_time: float           # (s) pure compute time inside the engine
     n_valid: int = 0              # rows actually computed (arrays are already trimmed to this)
 

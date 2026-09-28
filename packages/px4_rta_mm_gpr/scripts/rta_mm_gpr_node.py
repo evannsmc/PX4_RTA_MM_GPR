@@ -484,7 +484,7 @@ class OffboardControl(Node):
 
         self.tube_timestep = 0.01  # Time step
         self.tube_horizon = self.options.tube_horizon   # Reachable tube horizon (default 30.0 s); an upper bound with early exit
-        self.collection_threshold = 1.0 # tube/reference deviation (m) that ends the safety horizon
+        self.collection_threshold = 0.5 # tube/reference POSITION deviation (m, py and pz) that ends the safety horizon
 
         # Everything static about the rollout, as plain values (picklable for the worker process)
         self.rollout_config = RolloutConfig(

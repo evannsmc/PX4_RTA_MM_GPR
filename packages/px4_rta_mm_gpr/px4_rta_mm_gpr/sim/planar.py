@@ -54,7 +54,7 @@ class SimConfig:
     tube_horizon: float = 30.0
     early_exit: bool = True
     tube_margin: float = 1.0               # (s)
-    collection_threshold: float = 1.0
+    collection_threshold: float = 0.5   # m: tube position bounds vs reference position (py, pz)
     x_pert: float = 5e-4
     min_altitude: Optional[float] = 0.3    # (m) ground floor in the certificate (None: no floor)
     gp_feedforward: bool = True
