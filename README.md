@@ -13,7 +13,9 @@ This is a multi-package repository. The Python node lives in `packages/px4_rta_m
 `packages/px4_rta_mm_gpr_cpp/` holds the C++ fast loop (PX4 I/O, 100 Hz control law, certification watchdog) and
 `packages/px4_rta_mm_gpr_msgs/` the messages between them. Build with
 `colcon build --symlink-install --base-paths PX4_RTA_MM_GPR/packages ...` and fly with
-`ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py`. Design notes and SITL results: `docs/_output/*.pdf` (01-05).
+`ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py`, with PX4 SITL started by `tools/run_sitl.sh` (it applies the
+PX4 parameters this project needs, e.g. `NAV_DLL_ACT=0`, on every start) and `MicroXRCEAgent udp4 -p 8888`.
+Design notes and SITL results: `docs/_output/*.pdf` (01-05).
 
 1. How to run:
 

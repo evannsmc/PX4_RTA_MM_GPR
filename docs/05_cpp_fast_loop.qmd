@@ -145,6 +145,7 @@ isolation:
 # Running it
 
 ```bash
+PX4_RTA_MM_GPR/tools/run_sitl.sh        # PX4 SITL + x500 (sets NAV_DLL_ACT=0); then MicroXRCEAgent udp4 -p 8888
 cd ~/<workspace>
 colcon build --symlink-install --base-paths PX4_RTA_MM_GPR/packages deps
 source install/setup.bash
