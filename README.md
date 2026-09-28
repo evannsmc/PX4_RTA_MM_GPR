@@ -56,7 +56,7 @@ tools/run_sitl.sh           PX4 SITL with this project's parameters
 ```bash
 git clone --recurse-submodules https://github.com/evannsmc/PX4_RTA_MM_GPR.git   # into <workspace>/
 sudo apt install libhdf5-dev python3-h5py
-pip install --user immrax control  # see docs/02 for the numpy 1.26 / ROS Jazzy caveats
+pip install --user immrax control imageio-ffmpeg  # see docs/02 for the numpy 1.26 / ROS Jazzy caveats
 colcon build --symlink-install --base-paths PX4_RTA_MM_GPR/packages <other deps: px4_msgs, mocap_msgs, ...>
 source install/setup.bash
 
@@ -78,7 +78,7 @@ result = simulate(SimConfig(duration=20.0), winds=paper_winds(scale=1.2), log_pa
 ## Data analysis
 
 `packages/px4_rta_mm_gpr/scripts/data_analysis/` has notebooks for flight logs and numerical simulations (summary and
-timing, tubes, GP animations, numerical studies); see its README. The paper's **hardware** logs are in
+timing, tubes, videos of every plan's reachable tube with the GPs, numerical studies); see its README. The paper's **hardware** logs are in
 `data_analysis/log_files/hardware/`, kept exactly as recorded. They come from the previous version of the code (tag
 `archive/main-2026-05-02`).
 

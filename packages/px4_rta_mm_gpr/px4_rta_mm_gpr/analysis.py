@@ -5,7 +5,7 @@
     rta.summary(log)                              # one-row table: timing, certification, tracking, altitude
     rta.plot_timeseries(log)                      # y / altitude / attitude / commands vs time, with plan references
     rta.plot_path(log)                            # y-altitude path with sampled certified tubes, goal and floor
-    rta.animate(log, 'flight.gif')                # path + current tube + the GP each plan used
+    rta.animate(log, 'flight.mp4', gif_path='flight.gif')   # overview + follow-cam of every plan's tube + GPs
 
 Everything is read from the flight log: each plan record carries its full tube, reference and the GP training data
 it was computed with, so the GP used at any moment can be reconstructed exactly (``plan_gp``).
@@ -13,6 +13,7 @@ Conventions: planar state (py, pz, h, v, theta) with pz in NED (negative up); pl
 """
 from __future__ import annotations
 
+import textwrap
 from typing import Optional, Sequence
 
 import numpy as np
@@ -82,6 +83,38 @@ def certified_rows(plan: dict) -> int:
     """Number of certified rows of a plan (rows before the first violation)."""
     v = int(plan.get('violation_idx', -1))
     return plan['reachable_tube'].shape[0] if v < 0 else max(v, 1)
+
+
+STATE_LABELS = ('y', 'altitude', 'h', 'v', 'theta')
+
+
+def valid_rows(plan: dict) -> int:
+    """Rows actually integrated (an early-exit rollout stops at the violation + margin; the rest is NaN)."""
+    return int(np.isfinite(plan['reachable_tube']).all(axis=1).sum())
+
+
+def tube_violation(plan: dict, threshold: float = 0.5, min_altitude: Optional[float] = None):
+    """Why a plan's certificate ends: (row, reason) for the first failing row, or (None, '') if none fails.
+
+    Same test as the rollout (jax_mm_rta.mm_rta._row_fails): a position bound (y or altitude) more than ``threshold``
+    from the reference position, or the tube's lowest point (upper bound of pz, NED) below the floor. Logs recorded
+    before the check became spatial may end on a velocity or attitude bound; that is reported too."""
+    v = int(plan.get('violation_idx', -1))
+    if v < 0:
+        return None, ''
+    tube, ref = plan['reachable_tube'][v], plan['rollout_ref'][v]
+    if not (np.isfinite(tube).all() and np.isfinite(ref).all()):
+        return v, 'NaN in the rollout'
+    reasons = []
+    if min_altitude is not None and tube[6] > -min_altitude:
+        reasons.append(f'tube below the {min_altitude:g} m floor')
+    dev = np.maximum(np.abs(ref - tube[:5]), np.abs(ref - tube[5:]))
+    for k in np.flatnonzero(dev[:2] > threshold):
+        reasons.append(f'tube {STATE_LABELS[k]} bound {dev[k]:.2f} m from the reference (> {threshold:g} m)')
+    if not reasons:   # logs from before the spatial-only check (threshold applied to every state)
+        reasons = [f'{STATE_LABELS[k]} bound {dev[k]:.2f} from the reference (old all-state check)'
+                   for k in np.flatnonzero(dev > threshold)]
+    return v, '; '.join(reasons) or 'threshold'
 
 
 def plan_times(plan: dict) -> np.ndarray:
@@ -166,7 +199,7 @@ def plot_path(log: FlightLog, ax=None, n_tubes: int = 12, show_reference: bool =
     for i, seq in enumerate(used[np.linspace(0, len(used) - 1, min(n_tubes, len(used))).astype(int)]):
         p = log.plan(int(seq))
         n = certified_rows(p)
-        tube, ref = p['reachable_tube'][:n], p['rollout_ref'][:n]
+        tube = p['reachable_tube'][:n]
         c = cmap(i / max(1, n_tubes - 1))
         for lo_y, lo_z, hi_y, hi_z in tube[::5, [0, 1, 5, 6]]:
             ax.add_patch(plt.Rectangle((lo_y, -hi_z), hi_y - lo_y, hi_z - lo_z, fc=c, ec='none', alpha=0.35))
@@ -192,99 +225,284 @@ def _quad_outline(y, alt, theta, scale):
     ts = -0.5 * np.arange(np.pi, 1.5 * np.pi, 0.2) + 0.3
     xt, yt = np.cos(ts), np.sin(ts) * np.cos(ts)
     xs = scale * np.hstack((0.4 * xt - 1, -1, -1, 1, 1, 0.4 * xt + 1))
-    ys = scale * np.hstack((0.3 * yt + 0.4, 0.4, 0, 0, 0.4, 0.3 * yt + 0.4))
+    ys = scale * (np.hstack((0.3 * yt + 0.4, 0.4, 0, 0, 0.4, 0.3 * yt + 0.4)) - 0.2)   # centred on the position
     c, s = np.cos(theta), np.sin(theta)
     return c * xs - s * ys + y, s * xs + c * ys + alt
 
 
-def animate(log: FlightLog, out_path: str, every: int = 10, fps: int = 20, winds=None,
-            altitude_range: Sequence[float] = (-0.5, 13.0), y_range: Optional[Sequence[float]] = None):
-    """GIF: flight with the current plan's certified tube and reference, plus the y- and z-wind GPs of that plan
-    (mean +- 3 sigma, observations sized by recency) and, if ``winds`` = (wy_field, wz_field) is given (numerical
-    simulations), the true wind profiles and a wind-field quiver."""
+def _boxes(tube: np.ndarray) -> np.ndarray:
+    """(n, 4, 2) rectangles in (y, altitude) from tube rows [lo(5), hi(5)] (pz is NED: altitude = -pz)."""
+    ylo, yhi, alo, ahi = tube[:, 0], tube[:, 5], -tube[:, 6], -tube[:, 1]
+    return np.stack([np.column_stack(c) for c in ((ylo, alo), (yhi, alo), (yhi, ahi), (ylo, ahi))], axis=1)
+
+
+class _TubeArtists:
+    """The tube of one plan in one axes: past rows (faded), certified rows (colored by look-ahead), the post-violation
+    margin (hatched), the failing row (red) with the threshold box around the reference, and the reference."""
+
+    def __init__(self, ax, cmap, norm, lw):
+        from matplotlib.collections import PolyCollection
+        from matplotlib.patches import Rectangle
+        self.cmap, self.norm, self._trail = cmap, norm, []
+        self.trail = ax.add_collection(PolyCollection([], facecolors='0.55', edgecolors='none', alpha=0.06, zorder=1))
+        self.margin = ax.add_collection(PolyCollection([], facecolors='none', edgecolors='0.45', hatch='////',
+                                                       linewidths=0.3, alpha=0.35, zorder=2))
+        self.past = ax.add_collection(PolyCollection([], edgecolors='none', alpha=0.10, zorder=2))
+        self.cert = ax.add_collection(PolyCollection([], linewidths=lw, zorder=3))
+        self.fail = ax.add_patch(Rectangle((0, 0), 0, 0, fc='none', ec='tab:red', lw=1.6, zorder=5, visible=False))
+        self.thr = ax.add_patch(Rectangle((0, 0), 0, 0, fc='none', ec='tab:red', lw=1.0, ls='--', zorder=5,
+                                          visible=False))
+        self.ref, = ax.plot([], [], color='k', lw=0.9, ls='--', zorder=4)
+        self.ref_cert, = ax.plot([], [], color='k', lw=1.4, zorder=4)
+
+    def add_trail(self, polys):
+        self._trail.extend(polys)
+        self.trail.set_verts(self._trail)
+
+    def update(self, p, row_now, n_cert, n_valid, v_row, thr, stride):
+        tube, ref, dt = p['reachable_tube'], p['rollout_ref'], float(p['dt'])
+        r0 = min(row_now, n_cert)
+        idx_cert = np.arange(r0, n_cert, stride)[::-1]                # draw far (large) boxes first
+        rgba = self.cmap(self.norm((idx_cert - row_now) * dt))
+        rgba[:, 3] = 0.30
+        edge = rgba.copy()
+        edge[:, 3] = 0.9
+        self.cert.set_verts(_boxes(tube[idx_cert]))
+        self.cert.set_facecolors(rgba)
+        self.cert.set_edgecolors(edge)
+        idx_past = np.arange(0, r0, stride)
+        self.past.set_verts(_boxes(tube[idx_past]))
+        self.past.set_facecolors(self.cmap(np.zeros(len(idx_past))))
+        # margin rows (not certified), drawn only while they stay within a few thresholds (they grow very fast)
+        half = 0.5 * np.maximum(tube[n_cert:n_valid, 5] - tube[n_cert:n_valid, 0],
+                                tube[n_cert:n_valid, 6] - tube[n_cert:n_valid, 1])
+        n_m = n_cert + int(np.argmax(half > 2 * thr)) if (half > 2 * thr).any() else n_valid
+        idx_m = np.arange(n_cert, n_m, 2 * stride)[::-1]
+        self.margin.set_verts(_boxes(tube[idx_m]))
+        self.ref.set_data(ref[:n_valid, 0], -ref[:n_valid, 1])
+        self.ref_cert.set_data(ref[r0:n_cert, 0], -ref[r0:n_cert, 1])
+        show = v_row is not None and v_row < n_valid
+        self.fail.set_visible(show)
+        self.thr.set_visible(show)
+        if show:
+            b = _boxes(tube[v_row:v_row + 1])[0]
+            self.fail.set_bounds(b[0, 0], b[0, 1], b[1, 0] - b[0, 0], b[2, 1] - b[0, 1])
+            ry, ra = ref[v_row, 0], -ref[v_row, 1]
+            self.thr.set_bounds(ry - thr, ra - thr, 2 * thr, 2 * thr)
+
+
+def _gif_frame(rgb: np.ndarray, width: int):
+    from PIL import Image
+    im = Image.fromarray(rgb)
+    im = im.resize((width, round(im.height * width / im.width)), Image.LANCZOS)
+    return im.quantize(colors=96, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+
+
+def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[str] = None, fps: int = 20,
+            speed: float = 1.0, winds=None, altitude_range: Optional[Sequence[float]] = None,
+            y_range: Optional[Sequence[float]] = None, zoom: float = 1.2, gif_fps: int = 8, gif_width: int = 640,
+            stride: int = 2, t_range: Optional[Sequence[float]] = None, dpi: int = 100, progress: bool = False):
+    """Video of a flight (SITL, hardware or numerical simulation) that shows every plan's mixed-monotone tube.
+
+    Panels: the whole flight (path, current tube, faint trail of all earlier certified tubes, goal, floor, and the
+    true wind field if ``winds`` = (wy_field, wz_field) is given); a follow-cam zoom on the vehicle where the tube is
+    drawn box by box (one interval box per rollout step, colored by look-ahead time; rows the vehicle has already
+    passed are faded; the uncertified margin after the violation is hatched; the failing box is outlined in red with
+    the +-threshold box around the reference and the reason in the title); and the y-/z-wind GPs the plan used
+    (mean +- 3 sigma, observations sized by recency, the range the tube spans shaded).
+
+    Real time by default (``speed`` = 1): frames every 1/fps s of flight, so each plan is on screen while it is in
+    use. Writes ``out_path`` (.mp4 via imageio-ffmpeg, or .gif) and optionally a smaller ``gif_path`` preview from the
+    same rendering pass. Returns the paths written."""
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib import colors as mcolors
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch, Rectangle
     use_style()
     T = log.ticks
     t_all = T['time'].to_numpy()
     y_all, alt_all, th_all = T['y'].to_numpy(), -T['z'].to_numpy(), T['roll'].to_numpy()
     seq_all = T['plan_seq'].to_numpy().astype(int)
-    frames = np.arange(0, len(T), every)
-    y_range = y_range or (min(-6.0, y_all.min() - 1), max(6.0, y_all.max() + 1))
-    alts = np.linspace(altitude_range[0], altitude_range[1], 120)
-    ys = np.linspace(y_range[0], y_range[1], 120)
+    row_all = T['traj_idx'].to_numpy().astype(int)
+    expired = T['plan_expired'].to_numpy().astype(bool)
+    md = log.metadata
+    thr = float(md.get('collection_threshold', 0.5))
+    floor = md.get('min_altitude')
+    floor = float(floor) if isinstance(floor, (int, float, np.floating)) and floor > 0 else None
+    goal = md.get('goal', md.get('goal_state'))
 
-    fig, (ax, bx, cx) = plt.subplots(1, 3, figsize=(15, 5.2), gridspec_kw={'width_ratios': [1.4, 1, 1]})
+    t0, t1 = (t_range if t_range is not None else (t_all[0], t_all[-1]))
+    frame_t = np.arange(t0, t1, speed / fps)
+    frame_k = np.clip(np.searchsorted(t_all, frame_t), 0, len(t_all) - 1)
+    plans, used = {}, np.unique(seq_all[frame_k])
+    for s_ in np.unique(seq_all):
+        p = log.plan(int(s_))
+        v_row, reason = tube_violation(p, thr, floor)
+        plans[int(s_)] = dict(p=p, n_cert=certified_rows(p), n_valid=valid_rows(p), v_row=v_row, reason=reason)
+    horizon = max(plans[int(s_)]['n_cert'] * float(plans[int(s_)]['p']['dt']) for s_ in used)
+    y_range = y_range or (min(-6.0, y_all.min() - 1), max(6.0, y_all.max() + 1))
+    altitude_range = altitude_range or (-0.5, max(8.0, alt_all.max() + 1))
+
+    fig = plt.figure(figsize=(12.8, 9.6), dpi=dpi)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.45, 1], width_ratios=[1, 1.15], left=0.06, right=0.93,
+                          bottom=0.07, top=0.91, hspace=0.28, wspace=0.18)
+    ax, zx = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
+    bx, cx = fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])
+    cmap = plt.get_cmap('viridis_r')
+    norm = mcolors.Normalize(0.0, horizon)
+    for a in (ax, zx):
+        a.set_aspect('equal', adjustable='datalim' if a is zx else 'box')
+        a.set_xlabel('y (m)')
+        a.set_ylabel('altitude (m)')
+        if floor is not None:
+            a.axhspan(altitude_range[0] - 50, floor, color='tab:red', alpha=0.08, lw=0, zorder=0)
+            a.axhline(floor, color='tab:red', lw=0.8, ls=':', zorder=0)
+        if goal is not None:
+            a.plot(goal[0], -goal[1], '*', color='tab:red', ms=14 if a is ax else 18, zorder=6)
     ax.set_xlim(*y_range)
     ax.set_ylim(*altitude_range)
-    ax.set_xlabel('y (m)')
-    ax.set_ylabel('altitude (m)')
-    floor = log.metadata.get('min_altitude')
-    if isinstance(floor, (int, float)) and floor > 0:
-        ax.axhspan(altitude_range[0], floor, color='tab:red', alpha=0.1, lw=0)
-    goal = log.metadata.get('goal_state')
-    if goal is not None:
-        ax.plot(goal[0], -goal[1], '*', color='tab:red', ms=12)
+    ax.set_title('whole flight', fontsize=10)
+    zx.set_title('follow-cam: the current plan\'s reachable tube, one interval box per rollout step', fontsize=10)
     quiver = None
-    if winds is not None:   # wind field: y-wind as horizontal arrows, z-wind (NED, + = down) as vertical arrows
-        q_y, q_alt = np.meshgrid(np.linspace(y_range[0], y_range[1], 11), np.linspace(0.5, altitude_range[1], 11))
-        quiver = ax.quiver(q_y, q_alt, np.zeros_like(q_y), np.zeros_like(q_y), color='0.55', alpha=0.6,
-                           scale=60, width=0.003)
-    path_line, = ax.plot([], [], 'k', lw=1.0)
-    ref_line, = ax.plot([], [], 'k--', lw=0.8)
-    lower_line, = ax.plot([], [], color='tab:red', lw=1.0)
-    upper_line, = ax.plot([], [], color='tab:blue', lw=1.0)
-    quad_line, = ax.plot([], [], color='tab:purple', lw=2)
-    title = ax.set_title('')
+    if winds is not None:
+        q_y, q_alt = np.meshgrid(np.linspace(y_range[0], y_range[1], 13), np.linspace(0.5, altitude_range[1], 13))
+        quiver = ax.quiver(q_y, q_alt, np.zeros_like(q_y), np.zeros_like(q_y), color='0.55', alpha=0.55,
+                           scale=60, width=0.003, zorder=1)
+    tubes = [_TubeArtists(ax, cmap, norm, 0.3), _TubeArtists(zx, cmap, norm, 0.6)]
+    paths = [a.plot([], [], color='tab:blue', lw=1.1, zorder=4)[0] for a in (ax, zx)]
+    quads = [a.plot([], [], color='tab:purple', lw=1.5 if a is ax else 2.5, zorder=7)[0] for a in (ax, zx)]
+    cam = ax.add_patch(Rectangle((0, 0), 0, 0, fc='none', ec='0.3', lw=0.8, zorder=8))
+    reason_txt = zx.text(0.02, 0.02, '', transform=zx.transAxes, fontsize=8.5, color='tab:red', va='bottom',
+                         bbox=dict(fc='white', ec='none', alpha=0.8), zorder=9)
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    cb = fig.colorbar(sm, ax=zx, fraction=0.035, pad=0.02)
+    cb.set_label('look-ahead from now (s)')
+    zx.legend(handles=[
+        Patch(fc=cmap(0.3), ec=cmap(0.3), alpha=0.6, label='certified tube (interval boxes)'),
+        Patch(fc='none', ec='0.45', hatch='////', label='margin after violation (not certified)'),
+        Patch(fc='none', ec='tab:red', lw=1.6, label='first failing box'),
+        Patch(fc='none', ec='tab:red', ls='--', label=f'reference +- {thr:g} m at that step'),
+        Line2D([], [], color='k', lw=1.4, label='plan reference (certified part)'),
+        Line2D([], [], color='tab:blue', lw=1.1, label='flown path'),
+        Patch(fc='0.6', alpha=0.3, label='earlier certified tubes')],
+        loc='upper left', fontsize=7.5, frameon=True, framealpha=0.85)
+    status = fig.suptitle('', fontsize=11.5, x=0.06, ha='left')
+
+    alts = np.linspace(altitude_range[0], altitude_range[1], 160)
+    ys = np.linspace(y_range[0], y_range[1], 160)
+    lim = 1.0
+    for s_ in used:
+        p = plans[int(s_)]['p']
+        lim = max(lim, *np.abs(p['obs_wy'][:, 2]), *np.abs(p['obs_wz'][:, 2]))
+    if winds is not None:
+        lim = max(lim, np.abs(winds[0](t0, alts)).max(), np.abs(winds[1](t0, ys)).max())
     panels = []
-    for axis, label, xs in ((bx, 'y-wind vs altitude', alts), (cx, 'z-wind vs lateral y', ys)):
-        mean_l, = axis.plot([], [], color='tab:blue', lw=1.2, label='GP mean')
-        band = [axis.fill_between(xs, 0 * xs, 0 * xs, color='tab:blue', alpha=0.2)]
-        true_l, = axis.plot([], [], color='k', lw=0.8, ls=':', label='true wind' if winds is not None else '_')
-        pts = axis.scatter([], [], color='tab:orange', zorder=3, label='observations')
-        axis.set_title(label, fontsize=9)
-        axis.set_xlabel('altitude (m)' if axis is bx else 'y (m)')
+    for axis, label, xs, xl in ((bx, 'y-wind GP (input: altitude)', alts, 'altitude (m)'),
+                                (cx, 'z-wind GP (input: y)', ys, 'y (m)')):
+        mean_l, = axis.plot([], [], color='tab:blue', lw=1.3, label='GP mean +- 3 sigma')
+        band = [axis.fill_between(xs, 0 * xs, 0 * xs, color='tab:blue', alpha=0.18)]
+        true_l, = axis.plot([], [], color='k', lw=0.9, ls=':', label='true wind' if winds is not None else '_')
+        pts = axis.scatter([], [], color='tab:orange', edgecolor='k', linewidth=0.3, zorder=4, label='observations')
+        span = [axis.axvspan(0, 0, color=cmap(0.3), alpha=0.25, lw=0, label='range the tube spans')]
+        now_l = axis.axvline(0, color='tab:purple', lw=1.0, label='vehicle')
+        axis.set_title(label, fontsize=10)
+        axis.set_xlabel(xl)
         axis.set_ylabel('wind force (N)')
         axis.set_xlim(xs[0], xs[-1])
-        axis.legend(frameon=False, fontsize=7, loc='upper right')
-        panels.append((axis, xs, mean_l, band, true_l, pts))
+        axis.set_ylim(-1.6 * lim, 1.6 * lim)
+        axis.legend(frameon=False, fontsize=7.5, loc='upper right', ncol=2)
+        panels.append((axis, xs, mean_l, band, true_l, pts, span, now_l))
 
-    def update(k):
-        t, seq = t_all[k], seq_all[k]
-        p = log.plan(int(seq))
-        n = certified_rows(p)
-        path_line.set_data(y_all[:k + 1], alt_all[:k + 1])
-        ref_line.set_data(p['rollout_ref'][:, 0], -p['rollout_ref'][:, 1])
-        lower_line.set_data(p['reachable_tube'][:n, 0], -p['reachable_tube'][:n, 1])
-        upper_line.set_data(p['reachable_tube'][:n, 5], -p['reachable_tube'][:n, 6])
-        quad_line.set_data(*_quad_outline(y_all[k], alt_all[k], -th_all[k], 0.35))
-        title.set_text(f't = {t:5.2f} s   plan #{seq}   certified for {n * p["dt"]:.2f} s')
+    trail_done, cam_c, cam_h = set(), None, None
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    writer = gif_frames = None
+    outs = []
+    mp4 = out_path is not None and out_path.lower().endswith('.mp4')
+    if mp4:
+        import imageio_ffmpeg   # pip install imageio-ffmpeg (bundles an ffmpeg binary)
+        writer = imageio_ffmpeg.write_frames(out_path, (w, h), fps=fps, codec='libx264', quality=8,
+                                             pix_fmt_out='yuv420p', macro_block_size=16)
+        import warnings
+        with warnings.catch_warnings():   # ffmpeg is fork+exec'd; JAX's fork warning does not apply
+            warnings.filterwarnings('ignore', message='os.fork')
+            writer.send(None)
+    if gif_path is not None or (out_path is not None and not mp4):
+        gif_frames = []
+    gif_every = max(1, round(fps / gif_fps))
+
+    for i, (t, k) in enumerate(zip(frame_t, frame_k)):
+        seq = int(seq_all[k])
+        P = plans[seq]
+        p, n_cert, n_valid, v_row = P['p'], P['n_cert'], P['n_valid'], P['v_row']
+        row_now = int(np.clip(row_all[k], 0, n_valid))
+        for s_ in used[used < seq]:                        # trail: certified tubes of plans no longer in use
+            if int(s_) not in trail_done:
+                trail_done.add(int(s_))
+                Q = plans[int(s_)]
+                for ta in tubes:
+                    ta.add_trail(_boxes(Q['p']['reachable_tube'][:Q['n_cert']:2]))
+        for ta in tubes:
+            ta.update(p, row_now, n_cert, n_valid, v_row, thr, stride)
+        for pl in paths:
+            pl.set_data(y_all[:k + 1], alt_all[:k + 1])
+        for q, sc in zip(quads, (0.25, 0.25)):
+            q.set_data(*_quad_outline(y_all[k], alt_all[k], -th_all[k], sc))
+        # follow-cam: centre on the vehicle, size to fit the certified tube and the failing box (smoothed)
+        rows = p['reachable_tube'][row_now:(v_row + 1 if v_row is not None else n_cert)]
+        b = _boxes(rows).reshape(-1, 2) if len(rows) else np.array([[y_all[k], alt_all[k]]])
+        c = np.array([y_all[k], alt_all[k]])
+        need = max(zoom, 1.15 * np.abs(b - c).max(), thr + 0.3)
+        cam_c = c if cam_c is None else 0.7 * cam_c + 0.3 * c
+        cam_h = need if cam_h is None else max(need, 0.9 * cam_h + 0.1 * need)
+        cam_h = min(cam_h, 6.0)
+        zx.set_xlim(cam_c[0] - cam_h, cam_c[0] + cam_h)
+        zx.set_ylim(cam_c[1] - cam_h, cam_c[1] + cam_h)
+        cam.set_bounds(cam_c[0] - cam_h, cam_c[1] - cam_h, 2 * cam_h, 2 * cam_h)
+        cert_s = max(n_cert - row_now, 0) * float(p['dt'])
+        state = 'UNCERTIFIED (no valid plan)' if expired[k] else f'certified {cert_s:.2f} s ahead'
+        status.set_text(f't = {t:6.2f} s    plan #{seq}  (age {t - float(p["t_start"]):.2f} s, rollout '
+                        f'{1e3 * float(p["compute_time"]):.1f} ms)    {state}')
+        status.set_color('tab:red' if expired[k] else 'k')
+        reason_txt.set_text(textwrap.fill(f'certificate ends at +{(v_row - row_now) * float(p["dt"]):.2f} s: '
+                                          f'{P["reason"]}', 85) if v_row is not None
+                            else 'no violation within the rollout horizon')
         if quiver is not None:
             wy_f, wz_f = winds
             quiver.set_UVC(wy_f(t, q_alt), -wz_f(t, q_y))
-        for (axis, xs, mean_l, band, true_l, pts), which in zip(panels, ('y', 'z')):
+        tube_c = p['reachable_tube'][row_now:n_cert]
+        for (axis, xs, mean_l, band, true_l, pts, span, now_l), which in zip(panels, ('y', 'z')):
             gp = plan_gp(p, which)
-            s_query = -xs if which == 'y' else xs          # the y-wind GP input is pz (NED) = -altitude
-            m, sd = gp.predict(t, s_query)
+            m, sd = gp.predict(t, -xs if which == 'y' else xs)      # the y-wind GP input is pz (NED) = -altitude
             mean_l.set_data(xs, m)
             band[0].remove()
-            band[0] = axis.fill_between(xs, m - 3 * sd, m + 3 * sd, color='tab:blue', alpha=0.2, lw=0)
+            band[0] = axis.fill_between(xs, m - 3 * sd, m + 3 * sd, color='tab:blue', alpha=0.12, lw=0)
             obs = p['obs_wy' if which == 'y' else 'obs_wz']
-            ox = -obs[:, 1] if which == 'y' else obs[:, 1]
-            pts.set_offsets(np.column_stack([ox, obs[:, 2]]))
-            pts.set_sizes(60 * np.exp(0.5 * np.minimum(obs[:, 0] - t, 0)))
+            pts.set_offsets(np.column_stack([-obs[:, 1] if which == 'y' else obs[:, 1], obs[:, 2]]))
+            pts.set_sizes(70 * np.exp(0.5 * np.minimum(obs[:, 0] - t, 0)))
+            if len(tube_c):
+                lo, hi = ((-tube_c[:, 6].max(), -tube_c[:, 1].min()) if which == 'y'
+                          else (tube_c[:, 0].min(), tube_c[:, 5].max()))
+                span[0].remove()
+                span[0] = axis.axvspan(lo, hi, color=cmap(0.3), alpha=0.25, lw=0)
+            now_l.set_xdata([alt_all[k] if which == 'y' else y_all[k]] * 2)
             if winds is not None:
-                field = winds[0] if which == 'y' else winds[1]
-                true_l.set_data(xs, field(t, xs))
-            lo, hi = np.nanmin(m - 3 * sd), np.nanmax(m + 3 * sd)
-            axis.set_ylim(min(lo, -1.0) - 0.5, max(hi, 1.0) + 0.5)
-        return path_line, ref_line, lower_line, upper_line, quad_line
-
-    def frame(i):
-        return update(frames[i])
-
-    fig.tight_layout()
-    anim = FuncAnimation(fig, frame, frames=len(frames), blit=False)
-    anim.save(out_path, writer=PillowWriter(fps=fps))
+                true_l.set_data(xs, (winds[0] if which == 'y' else winds[1])(t, xs))
+        fig.canvas.draw()
+        rgb = np.asarray(fig.canvas.buffer_rgba())[..., :3]
+        if writer is not None:
+            writer.send(np.ascontiguousarray(rgb))
+        if gif_frames is not None and i % gif_every == 0:
+            gif_frames.append(_gif_frame(rgb, gif_width))
+        if progress and i % 50 == 0:
+            print(f'frame {i}/{len(frame_t)}', flush=True)
     plt.close(fig)
-    return out_path
+    if writer is not None:
+        writer.close()
+        outs.append(out_path)
+    if gif_frames:
+        target = gif_path if gif_path is not None else out_path
+        gif_frames[0].save(target, save_all=True, append_images=gif_frames[1:], duration=int(1000 / fps * gif_every),
+                           loop=0, optimize=True)
+        outs.append(target)
+    return outs

@@ -42,8 +42,28 @@ def test_short_simulation_round_trip(tmp_path):
         assert row['plans'] == s['plans'] and row['uncertified_pct'] == 0.0
         p = log.plan(1)
         assert p['reachable_tube'].shape[1] == 10 and p['obs_wy'].shape == (9, 3)
-        gif = rta.animate(log, str(tmp_path / 'a.gif'), every=40, fps=5, winds=paper_winds(scale=0.6))
-        assert (tmp_path / 'a.gif').stat().st_size > 1000 and gif.endswith('a.gif')
+        outs = rta.animate(log, str(tmp_path / 'a.mp4'), gif_path=str(tmp_path / 'a.gif'), fps=2, gif_fps=2,
+                           winds=paper_winds(scale=0.6))
+        assert outs == [str(tmp_path / 'a.mp4'), str(tmp_path / 'a.gif')]
+        assert all((tmp_path / n).stat().st_size > 1000 for n in ('a.mp4', 'a.gif'))
+
+
+def test_certificate_is_spatial():
+    """Only the position bounds (py, pz) and the floor end a certificate; velocity/attitude spread does not."""
+    import jax.numpy as jnp
+    from px4_rta_mm_gpr.jax_mm_rta import collection_id_jax
+    ref = jnp.zeros((4, 5)).at[:, 1].set(-2.0)                       # hover at 2 m altitude
+    lo, hi = ref - 0.01, ref + 0.01
+    lo, hi = lo.at[1, 2:].add(-5.0), hi.at[1, 2:].add(5.0)          # row 1: huge velocity / attitude spread
+    hi = hi.at[2, 0].set(0.6)                                          # row 2: y bound 0.6 m from the reference
+    tube = jnp.hstack([lo, hi])
+    assert int(collection_id_jax(ref, tube, 0.5)) == 2
+    assert int(collection_id_jax(ref, tube.at[2, 5].set(0.01), 0.5)) == -1
+    floor = tube.at[2, 5].set(0.01).at[3, 6].set(-0.2)                 # row 3: lowest point at 0.2 m altitude
+    assert int(collection_id_jax(ref, floor, 0.5, z_max=-0.3)) == 3
+    p = {'violation_idx': 2, 'reachable_tube': np.asarray(tube), 'rollout_ref': np.asarray(ref)}
+    row, reason = rta.tube_violation(p, 0.5, 0.3)
+    assert row == 2 and reason.startswith('tube y bound 0.60 m')
 
 
 def test_calm_simulation_reaches_goal(tmp_path):
