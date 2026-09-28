@@ -1,4 +1,4 @@
-"""Read flight logs written by FlightRecorder, and export the legacy ROS2Logger CSV.
+"""Read RTA-MM-GPR flight logs, and export the legacy ROS2Logger CSV.
 
     from px4_rta_mm_gpr.flight_log import FlightLog
     log = FlightLog('log.h5')
@@ -6,6 +6,12 @@
     log.plan(12)              # dict with the full tube / reference / inputs of plan #12
     log.plan_at(21.3)         # the plan that was in use at t = 21.3 s
     log.tube_from(21.3)       # remaining tube (lower/upper) of that plan from t = 21.3 s onwards
+
+Reads both layouts:
+  * flight_recorder files (format="flight_recorder"; written since the switch to the flight_recorder submodule),
+    through flight_recorder.FlightLog;
+  * the earlier self-contained layout (/ticks, /wind, /gains, /plans/<seq:05d>, /timing, /events), so older logs
+    and the figures made from them keep working.
 """
 from __future__ import annotations
 
@@ -24,19 +30,37 @@ class FlightLog:
     def __init__(self, path: str):
         import h5py
         self.path = path
-        self._f = h5py.File(path, 'r')
-        self.metadata = {k: _py(v) for k, v in self._f.attrs.items()}
-        self.ticks = _frame(self._f['ticks'])
-        self.wind = _frame(self._f['wind'])
-        self.gains = _frame(self._f['gains'])
-        self.plan_seqs = np.array(sorted(int(k) for k in self._f['plans'].keys()))
-        self._plan_t_start = np.array([self._f['plans'][f'{s:05d}'].attrs['t_start'] for s in self.plan_seqs])
-        self.timing = {k: self._f['timing'][k][()] for k in self._f['timing']} if 'timing' in self._f else {}
-        self.events = (pd.DataFrame({k: [_py(v) for v in self._f['events'][k][()]] for k in self._f['events']})
-                       if 'events' in self._f else pd.DataFrame(columns=['time', 'kind', 'detail']))
+        with h5py.File(path, 'r') as f:
+            fmt = _py(f.attrs.get('format', ''))
+        self.legacy_format = fmt != 'flight_recorder'
+        if self.legacy_format:
+            self._fr = None
+            self._f = h5py.File(path, 'r')
+            self.metadata = {k: _py(v) for k, v in self._f.attrs.items()}
+            self.ticks = _frame(self._f['ticks'])
+            self.wind = _frame(self._f['wind'])
+            self.gains = _frame(self._f['gains'])
+            self.plan_seqs = np.array(sorted(int(k) for k in self._f['plans'].keys()))
+            self.timing = {k: self._f['timing'][k][()] for k in self._f['timing']} if 'timing' in self._f else {}
+            self.events = (pd.DataFrame({k: [_py(v) for v in self._f['events'][k][()]] for k in self._f['events']})
+                           if 'events' in self._f else pd.DataFrame(columns=['time', 'kind', 'detail']))
+        else:
+            from flight_recorder import FlightLog as _FRLog
+            self._f = None
+            self._fr = _FRLog(path)
+            self.metadata = self._fr.metadata
+            self.ticks = self._fr['ticks']
+            self.wind = self._fr['wind']
+            self.gains = self._fr['gains']
+            groups = self._fr.record_groups
+            self.plan_seqs = np.array([int(k) for k in self._fr.record_keys('plans')] if 'plans' in groups else [],
+                                      dtype=int)
+            self.timing = ({k: self._fr.record('timing', k)['values'] for k in self._fr.record_keys('timing')}
+                           if 'timing' in groups else {})
+            self.events = self._fr.events
 
     def close(self):
-        self._f.close()
+        (self._fr or self._f).close()
 
     def __enter__(self):
         return self
@@ -45,6 +69,8 @@ class FlightLog:
         self.close()
 
     def plan(self, seq: int) -> dict:
+        if self._fr is not None:
+            return self._fr.record('plans', int(seq))
         g = self._f['plans'][f'{int(seq):05d}']
         out = {k: g[k][()] for k in g.keys()}
         out.update({k: _py(v) for k, v in g.attrs.items()})

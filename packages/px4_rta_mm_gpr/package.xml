@@ -10,6 +10,7 @@
   <depend>rclpy</depend>
   <depend>px4_msgs</depend>
   <depend>std_msgs</depend>
+  <exec_depend>flight_recorder</exec_depend>  <!-- git submodule packages/flight_recorder -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

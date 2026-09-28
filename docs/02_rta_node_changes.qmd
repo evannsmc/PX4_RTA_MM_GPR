@@ -29,8 +29,8 @@ document, *Concurrency in ROS 2 (Python)*.
 # How to run
 
 ```bash
-# terminal 1: PX4 SITL (Gazebo Harmonic, x500)
-cd ~/PX4-Autopilot && make px4_sitl gz_x500
+# terminal 1: PX4 SITL (Gazebo Harmonic, x500), with this project's PX4 parameters
+PX4_RTA_MM_GPR/tools/run_sitl.sh          # HEADLESS=1 for no Gazebo window
 # terminal 2: XRCE-DDS agent
 MicroXRCEAgent udp4 -p 8888
 # terminal 3: relay (remaps PX4 1.17's versioned topic) + node
@@ -64,7 +64,11 @@ unless you ask for it.
 * PX4 1.17 publishes `/fmu/out/vehicle_local_position_v1`. `mocap_px4_relays/full_state_relay`
   still subscribes to the unversioned name, so its freshness gate never opens and no `FullState` is
   published. The launch files now remap the topic.
-* SITL without QGroundControl refuses to arm ("No connection to the GCS"): `param set NAV_DLL_ACT 0`.
+* SITL without QGroundControl refuses to arm ("No connection to the GCS") unless `NAV_DLL_ACT = 0`.
+  `tools/run_sitl.sh` sets it through the environment (`PX4_PARAM_NAV_DLL_ACT=0`) on every start. A saved
+  `param set` is not enough: PX4 resets all saved parameters whenever the previously booted airframe differs
+  (e.g. after another project booted its own airframe from the same `~/PX4-Autopilot`), and `PX4_PARAM_*`
+  variables are applied after that reset.
 * `immrax` 0.3.x pins `numpy~=2.3`, but ROS 2 Jazzy's message bindings are built against Ubuntu's
   numpy 1.26. `immrax` is installed with `--no-deps` and its other dependencies with numpy pinned
   at 1.26.4 (all in `~/.local`). `scipy>=1.14` is needed for `Rotation.from_quat(..., scalar_first=True)`.
@@ -207,6 +211,14 @@ exactly as before.
 ![Age of the plan used by each control tick (time since its rollout started).](figures/plan_age_cdf.pdf){#fig-age}
 
 # The new flight recorder
+
+> **Update (branch `cpp-fast-loop`):** the generic part of this recorder is now the standalone library
+> [flight_recorder](https://github.com/evannsmc/flight_recorder), included as a git submodule in
+> `packages/flight_recorder`. `px4_rta_mm_gpr/flight_log/` is a thin RTA-specific layer on top of it: the tick,
+> wind and gain columns, the plan records, the legacy CSV and the tube helpers. Files now use the library's layout
+> (`streams/ticks`, `streams/wind`, `streams/gains`, `records/plans/<seq>`, `records/timing/<name>`, `events`) and
+> are flushed to disk every 5 s during flight (`--log-autosave`), so a crash loses at most 5 s. `FlightLog` reads
+> both the new files and the earlier layout shown below.
 
 `px4_rta_mm_gpr/flight_log/` replaces the ROS2Logger `LogType`s:
 

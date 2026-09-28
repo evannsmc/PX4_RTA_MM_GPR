@@ -217,7 +217,8 @@ def tube_snapshot(h5_path):
     """Stored tubes from a new-format flight log: (a) every plan's certified tube along the path,
     (b) one plan's full stored tube versus time, with its safety-horizon cut-off."""
     import sys
-    sys.path.insert(0, str(HERE.parents[1]))
+    sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'px4_rta_mm_gpr'))
+    sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'flight_recorder'))  # git submodule
     from px4_rta_mm_gpr.flight_log import FlightLog
     with FlightLog(str(h5_path)) as log:
         t = log.ticks

@@ -22,7 +22,8 @@ plt.rcParams.update({'pdf.fonttype': 42, 'ps.fonttype': 42, 'font.size': 9,
                      'axes.spines.top': False, 'axes.spines.right': False})
 HERE = Path(__file__).resolve().parent
 DATA = HERE.parent / 'data'
-sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'px4_rta_mm_gpr'))
+sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'flight_recorder'))  # git submodule
 
 CONFIGS = [  # prefix, label
     ('r3_base', 'infrastructure only'),

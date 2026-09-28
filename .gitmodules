@@ -1,0 +1,3 @@
+[submodule "packages/flight_recorder"]
+	path = packages/flight_recorder
+	url = https://github.com/evannsmc/flight_recorder.git
