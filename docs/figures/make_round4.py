@@ -17,7 +17,7 @@ plt.rcParams.update({'pdf.fonttype': 42, 'ps.fonttype': 42, 'font.size': 9,
                      'axes.spines.top': False, 'axes.spines.right': False})
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parent / 'data' / 'round4'
-sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'px4_rta_mm_gpr'))
 
 PANELS = [('r5_defaults', '(a) goal 0.6 m, old Q_ref', 0.6, 0.3),
           ('r5_tuned', '(b) goal 1.0 m, new Q_ref', 1.0, 0.3),

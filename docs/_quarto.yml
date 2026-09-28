@@ -6,6 +6,7 @@ project:
     - 02_rta_node_changes.qmd
     - 03_compilation_rollouts_wind.qmd
     - 04_altitude_and_ground.qmd
+    - 05_cpp_fast_loop.qmd
 
 
 format:

@@ -11,6 +11,10 @@ from px4_msgs.msg import(
     RcChannels
 )
 from mocap_msgs.msg import FullState
+try: # only needed with --cpp-control (branch cpp-fast-loop)
+    from px4_rta_mm_gpr_msgs.msg import PlannerStatus, RtaPlan, RtaGains, ControlTick
+except ImportError:
+    PlannerStatus = RtaPlan = RtaGains = ControlTick = None
 
 
 import gc
@@ -66,6 +70,7 @@ class RuntimeOptions:
     entry_ramp: bool = False             # move the RTA goal from the entry position to GOAL_STATE at bounded speed
     ramp_speed_y: float = 0.5            # (m/s) lateral speed of the ramped goal
     ramp_speed_z: float = 1.0            # (m/s) vertical speed of the ramped goal
+    cpp_control: bool = False            # planner only: the C++ rta_fast_loop owns PX4 I/O and the 100 Hz control law
     verbose: bool = False                # per-callback debug printing (slow: ~100s of prints/s)
 
 
@@ -368,12 +373,29 @@ class OffboardControl(Node):
         gc.callbacks.append(self._gc_callback) # registered after init: only in-flight collections are reported
 
         # Timers for my callback functions (created last so no callback runs before init finishes)
-        self.offboard_timer = self.create_timer(self.heartbeat_period,
-                                                self.offboard_heartbeat_signal_callback,
-                                                callback_group=self.px4_io_group) #Offboard 'heartbeat' signal should be sent at 10Hz
-        self.control_timer = self.create_timer(self.control_period,
-                                               self.control_algorithm_callback,
-                                               callback_group=self.control_group) #My control algorithm needs to execute at >= 100Hz
+        if self.options.cpp_control:
+            # Planner mode: the C++ fast loop (px4_rta_mm_gpr_cpp/rta_fast_loop) sends everything to PX4. This node
+            # publishes its mission clock + tunables, every installed plan and every gain update, and logs the fast
+            # loop's ControlTicks into the same flight recorder.
+            if ControlTick is None:
+                raise RuntimeError("--cpp-control needs the px4_rta_mm_gpr_msgs package (branch cpp-fast-loop)")
+            reliable = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
+            self.status_pub = self.create_publisher(PlannerStatus, '/rta/planner_status', reliable)
+            self.plan_pub = self.create_publisher(RtaPlan, '/rta/plan', reliable)
+            self.gains_pub = self.create_publisher(RtaGains, '/rta/gains', reliable)
+            self.plans_by_seq = {}
+            self.tick_sub = self.create_subscription(
+                ControlTick, '/rta/control_tick', self.control_tick_callback,
+                QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=100),
+                callback_group=self.control_group)
+            self.status_timer = self.create_timer(0.1, self.planner_status_callback, callback_group=self.px4_io_group)
+        else:
+            self.offboard_timer = self.create_timer(self.heartbeat_period,
+                                                    self.offboard_heartbeat_signal_callback,
+                                                    callback_group=self.px4_io_group) #Offboard 'heartbeat' signal should be sent at 10Hz
+            self.control_timer = self.create_timer(self.control_period,
+                                                   self.control_algorithm_callback,
+                                                   callback_group=self.control_group) #My control algorithm needs to execute at >= 100Hz
         self.rollout_timer = self.create_timer(self.control_period,
                                                self.rollout_callback,
                                                callback_group=self.rollout_group) #Checks at 100Hz whether a new rollout is needed
@@ -657,6 +679,69 @@ class OffboardControl(Node):
         self.recorder.wind_sample(t, self.wy, self.wz, s.ay, s.az, ay_hat, az_hat, s.z, s.y)
 
 
+    # ~~ planner mode (--cpp-control): talk to the C++ fast loop ~~
+    def planner_status_callback(self) -> None:
+        """10 Hz: mission clock + every tunable of the control law (the fast loop's single source of truth)."""
+        m = PlannerStatus()
+        m.t0_epoch = float(self.T0)
+        m.sim = bool(self.sim)
+        m.mass = float(self.MASS)
+        m.thrust_min, m.thrust_max = float(self.ulim_lower[0]), float(self.ulim_upper[0])
+        m.roll_rate_max = float(self.ulim_upper[1])
+        m.nr_rate_limit = float(ControlKernels.NR_RATE_LIMIT) if self.options.nr_anti_windup else float('inf')
+        m.t_lookahead, m.lookahead_step = float(self.T_LOOKAHEAD), float(self.T_LOOKAHEAD_PRED_STEP)
+        m.integration_step = float(self.INTEGRATION_TIME)
+        m.begin_actuator_control, m.land_time = float(self.begin_actuator_control), float(self.land_time)
+        m.max_y, m.max_height = float(self.max_y), float(self.max_height)
+        m.nr_ref_from_plan = bool(self.options.nr_ref_from_plan)
+        m.backup, m.backup_grace = self.options.backup, float(self.options.backup_grace)
+        self.status_pub.publish(m)
+        t = self.now()
+        if int(t) != int(t - 0.1): # ~1 Hz status line
+            plan = self.plan
+            self.get_logger().info(f"t={t:5.1f}s planner: offboard={self.in_offboard_mode} plan#={plan.seq if plan else '-'} "
+                                   f"rollout={1e3 * plan.compute_time if plan else float('nan'):.1f}ms "
+                                   f"ticks logged={len(self.recorder.ticks)}")
+
+    def publish_plan(self, plan: RolloutPlan) -> None:
+        m = RtaPlan()
+        m.seq, m.warmup = int(plan.seq), bool(plan.warmup)
+        m.t_start, m.dt, m.collection_time = float(plan.t_start), float(plan.dt), float(plan.collection_time)
+        m.violation_idx, m.n_rows = int(plan.violation_idx), int(plan.rollout_ref.shape[0])
+        m.rollout_ref = np.ascontiguousarray(plan.rollout_ref, dtype=np.float64).ravel().tolist()
+        m.feedfwd_input = np.ascontiguousarray(plan.feedfwd_input, dtype=np.float64).ravel().tolist()
+        self.plans_by_seq[plan.seq] = plan
+        for old in [k for k in self.plans_by_seq if k < plan.seq - 200]:
+            del self.plans_by_seq[old]
+        self.plan_pub.publish(m)
+
+    def publish_gains(self, t: float) -> None:
+        if not self.options.cpp_control:
+            return
+        m = RtaGains()
+        m.t = float(t)
+        m.k_feedback = np.asarray(self.gains[0], dtype=np.float64).ravel().tolist()
+        self.gains_pub.publish(m)
+
+    def control_tick_callback(self, m) -> None:
+        """Log one C++ control tick (same columns as the Python loop) and track its command for the wind EKF / LQR."""
+        if m.phase == ControlTick.PHASE_RTA:
+            u = np.array(m.u, dtype=np.float64)
+            self.last_input = u
+            plan = self.plans_by_seq.get(m.plan_seq)
+            if plan is not None:
+                s = m.nr_state
+                self.recorder.tick(m.t, s[0], s[1], s[2], s[8], s[3], s[4], s[5], s[6], s[7],
+                                   u[0], m.throttle, u[1], u[2], u[3], m.ctrl_comp_time, self.wy, self.wz,
+                                   plan, m.traj_idx)
+                self.loop_stats['control'].record(m.control_period, m.ctrl_comp_time)
+                if m.plan_expired:
+                    self.certification_gaps += 1
+        if m.backup_engaged and self.backup_engaged is None:
+            self.backup_engaged = m.backup_reason
+            self.recorder.event(m.t, 'backup_land', m.backup_reason)
+            self.get_logger().warn(f"fast loop reports BACKUP -> LAND at t={m.t:.2f} s ({m.backup_reason})")
+
     def lqr_update_callback(self) -> None:
         """Re-linearize the planar model and recompute both LQR gains when needed.
 
@@ -675,6 +760,7 @@ class OffboardControl(Node):
             self.gains = self.compute_lqr_gains(s.rta_mm_gpr_state_vector_planar, self.hover_input_planar)
             self.last_lqr_update_time = t
             self.recorder.gain_update(t, True, *self.gains)
+            self.publish_gains(t)
         elif in_rta_window and ((t - self.last_lqr_update_time) >= 1.8 or abs(self.yaw_error(t, s.yaw)) > self.max_yaw_stray):
             self.update_lqr_feedback(self.quad_sys_planar, s.rta_mm_gpr_state_vector_planar, self.last_input, t)
 
@@ -841,6 +927,8 @@ class OffboardControl(Node):
                                goal=req.goal)
             self.collection_time = collection_time
             self.plan = plan # <- the single atomic "publish"
+        if self.options.cpp_control:
+            self.publish_plan(plan)
 
         self.recorder.add_plan(plan)
         self.rollout_compute_times.append(result.compute_time)
@@ -1017,6 +1105,7 @@ class OffboardControl(Node):
             t0 = time.time()
             self.gains = self.compute_lqr_gains(state, input) # (K_feedback, K_reference), swapped in atomically
             self.recorder.gain_update(t, False, *self.gains)
+            self.publish_gains(t)
             self.debug(f"LQR Update time: {time.time()-t0}")
 
             self.last_lqr_update_time = t  # Update the last LQR update time

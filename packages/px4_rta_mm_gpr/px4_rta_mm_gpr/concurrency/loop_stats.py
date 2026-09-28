@@ -30,6 +30,14 @@ class LoopStats:
         self._last_start = None
         self._capacity = capacity
 
+    def record(self, period: float, exec_time: float) -> None:
+        """Add a sample measured elsewhere (e.g. by the C++ fast loop, reported in its ControlTick)."""
+        with self._lock:
+            if self._n < self._capacity:
+                self._periods[self._n] = np.nan if self._n == 0 else period
+                self._exec[self._n] = exec_time
+                self._n += 1
+
     @contextmanager
     def measure(self):
         start = time.perf_counter()
