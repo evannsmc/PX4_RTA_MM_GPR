@@ -1,68 +1,26 @@
-"""Low-overhead flight recorder: preallocated NumPy buffers in flight, one HDF5 file at shutdown.
+"""RTA-MM-GPR flight log, built on the flight_recorder library (packages/flight_recorder, a git submodule).
 
-Why not per-tick Python lists (the ROS2Logger approach)?
-  * every appended list/tuple is a new object the cyclic garbage collector must track and scan;
-    in this node that made full collections take ~300 ms (every thread frozen), and
-  * the reachable tube was re-appended (12 rows x 4 values) on EVERY control tick, although it only
-    changes when a new rollout plan is installed.
+flight_recorder does the generic work: preallocated column buffers (nothing for the GC to scan), one HDF5 file,
+incremental flushing/autosave. This module only defines what an RTA-MM-GPR flight consists of:
 
-Here each control tick writes one row into a preallocated float64 array (no allocation), and every
-rollout plan is stored exactly once, in full precision, together with everything that went into it
-(initial state, gains, GP data), so any plan can be reproduced offline.
-
-File layout (``h5dump -n flight.h5``)::
-
-    /                       attrs: metadata (options, tunables, git commit, host, date)
-    /ticks/<column>         one row per RTA control tick
-    /wind/<column>          one row per wind-estimator tick
-    /gains/<column>         one row per LQR update (K matrices flattened row-major)
-    /plans/<seq>/           reachable_tube (N+1,10), rollout_ref (N+1,5), feedfwd_input (N,2),
-                            state0, K_feedback, K_reference, obs_wy, obs_wz; attrs t_start, dt,
-                            collection_time, violation_idx, compute_time, latency, warmup
-    /timing/<name>          raw loop periods / exec times, rollout compute/latency, GC pauses
+    streams/ticks     one row per RTA control tick (TICK_COLUMNS)
+    streams/wind      one row per wind-EKF update (WIND_COLUMNS)
+    streams/gains     one row per LQR update, K matrices flattened row-major (GAIN_COLUMNS)
+    records/plans/<seq>    every installed rollout plan, stored ONCE: reachable_tube, rollout_ref, feedfwd_input and
+                           the inputs that produced it (state0, K_feedback, K_reference, obs_wy, obs_wz, goal);
+                           attrs seq, t_start, dt, collection_time, violation_idx, compute_time, latency, warmup
+    records/timing/<name>  loop periods / exec times, rollout compute / latency, GC pauses (arrays)
+    events            e.g. backup_land
+    root attrs        node options and tunables, git commit, host, date
 """
 from __future__ import annotations
 
-import datetime
 import os
-import socket
-import subprocess
-import threading
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
-
-class ColumnBuffer:
-    """Append-only table of float64 columns backed by one preallocated 2-D array.
-
-    ``append`` writes a row in place (amortised O(1), grows by doubling), so the hot path creates
-    no Python containers. Each buffer must have a single writer thread.
-    """
-
-    def __init__(self, columns: Iterable[str], capacity: int = 1024):
-        self.columns: List[str] = list(columns)
-        self._index: Dict[str, int] = {c: i for i, c in enumerate(self.columns)}
-        self._data = np.full((capacity, len(self.columns)), np.nan)
-        self._n = 0
-
-    def __len__(self) -> int:
-        return self._n
-
-    def append(self, *values: float) -> None:
-        if self._n == self._data.shape[0]:
-            grown = np.full((2 * self._data.shape[0], self._data.shape[1]), np.nan)
-            grown[:self._n] = self._data
-            self._data = grown
-        self._data[self._n] = values
-        self._n += 1
-
-    def column(self, name: str) -> np.ndarray:
-        return self._data[:self._n, self._index[name]]
-
-    def as_dict(self) -> Dict[str, np.ndarray]:
-        return {c: self._data[:self._n, i].copy() for i, c in enumerate(self.columns)}
-
+from flight_recorder import Recorder, git_commit
 
 TICK_COLUMNS = (
     # time and state (NED, rad)
@@ -86,22 +44,25 @@ WIND_COLUMNS = ('time', 'wy', 'wz', 'ay_meas', 'az_meas', 'ay_model', 'az_model'
 GAIN_COLUMNS = ('time', 'first_lqr') + tuple(f'K_feedback_{i}{j}' for i in range(2) for j in range(5)) \
     + tuple(f'K_reference_{i}{j}' for i in range(2) for j in range(5))
 
+PLAN_ARRAYS = ('reachable_tube', 'rollout_ref', 'feedfwd_input', 'state0', 'K_feedback', 'K_reference',
+               'obs_wy', 'obs_wz', 'goal')
+PLAN_ATTRS = ('seq', 't_start', 'dt', 'collection_time', 'violation_idx', 'compute_time', 'latency', 'warmup')
+
 
 class FlightRecorder:
+    """The node's recorder. Same calls as before; storage is a flight_recorder.Recorder."""
+
     def __init__(self, metadata: Optional[dict] = None, tick_capacity: int = 60_000):
-        self.metadata = dict(metadata or {})
-        self.metadata.setdefault('created', datetime.datetime.now().isoformat(timespec='seconds'))
-        self.metadata.setdefault('host', socket.gethostname())
-        self.metadata.setdefault('git_commit', _git_commit())
-        self.ticks = ColumnBuffer(TICK_COLUMNS, tick_capacity)
-        self.wind = ColumnBuffer(WIND_COLUMNS, 4096)
-        self.gains = ColumnBuffer(GAIN_COLUMNS, 1024)
-        self.plans: list = []            # RolloutPlan objects (immutable; stored by reference, no copy)
-        self.events: list = []           # (time, kind, detail) -- rare, e.g. the RTA backup engaging
-        self._plans_lock = threading.Lock()
+        meta = {'source': 'px4_rta_mm_gpr', 'git_commit': git_commit(os.path.dirname(os.path.realpath(__file__)))}
+        meta.update(metadata or {})
+        self.rec = Recorder(metadata={k: v for k, v in meta.items() if v is not None})
+        self.ticks = self.rec.stream('ticks', TICK_COLUMNS, capacity=tick_capacity)
+        self.wind = self.rec.stream('wind', WIND_COLUMNS, capacity=tick_capacity)
+        self.gains = self.rec.stream('gains', GAIN_COLUMNS, capacity=4096)
+        self.n_plans = 0
         self._last_tick_time = np.nan
 
-    # ~~ hot-path API: one call per event, no allocation beyond the argument tuple ~~
+    # ~~ hot path: one call per event ~~
     def tick(self, t, x, y, z, yaw, vx, vy, vz, roll, pitch, thrust, throttle, roll_rate, pitch_rate,
              yaw_rate, ctrl_comp_time, wy, wz, plan, traj_idx) -> None:
         ref = plan.rollout_ref[traj_idx]
@@ -123,64 +84,25 @@ class FlightRecorder:
         self.gains.append(t, float(first_lqr), *np.ravel(K_feedback), *np.ravel(K_reference))
 
     def event(self, t: float, kind: str, detail: str = '') -> None:
-        self.events.append((float(t), str(kind), str(detail)))
+        self.rec.event(t, kind, detail)
 
     def add_plan(self, plan) -> None:
-        with self._plans_lock:
-            self.plans.append(plan)
+        """Store a plan once, by reference (RolloutPlan arrays are never mutated after construction)."""
+        arrays = {k: getattr(plan, k) for k in PLAN_ARRAYS if getattr(plan, k, None) is not None}
+        attrs = {k: getattr(plan, k) for k in PLAN_ATTRS}
+        self.rec.record('plans', int(plan.seq), arrays, attrs)
+        self.n_plans += 1
 
-    # ~~ shutdown ~~
+    # ~~ writing ~~
+    @staticmethod
+    def h5_path(path: str) -> str:
+        return os.path.splitext(path)[0] + '.h5'
+
+    def start_autosave(self, path: str, period: float) -> None:
+        """Flush to ``path`` every ``period`` s during the flight, so a crash loses at most that much."""
+        self.rec.start_autosave(period, self.h5_path(path))
+
     def save(self, path: str, timing: Optional[Dict[str, np.ndarray]] = None) -> str:
-        import h5py  # imported lazily: only needed at shutdown
-        path = os.path.splitext(path)[0] + '.h5'
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        comp = dict(compression='gzip', compression_opts=4, shuffle=True)
-        with h5py.File(path, 'w') as f:
-            for key, value in self.metadata.items():
-                f.attrs[key] = _attr(value)
-            for group_name, buf in (('ticks', self.ticks), ('wind', self.wind), ('gains', self.gains)):
-                g = f.create_group(group_name)
-                for name, col in buf.as_dict().items():
-                    g.create_dataset(name, data=col, **(comp if col.size > 64 else {}))
-            plans = f.create_group('plans')
-            with self._plans_lock:
-                saved = list(self.plans)
-            for plan in saved:
-                g = plans.create_group(f'{plan.seq:05d}')
-                for name in ('reachable_tube', 'rollout_ref', 'feedfwd_input'):
-                    g.create_dataset(name, data=getattr(plan, name), **comp)
-                for name in ('state0', 'K_feedback', 'K_reference', 'obs_wy', 'obs_wz', 'goal'):
-                    value = getattr(plan, name, None)
-                    if value is not None:
-                        g.create_dataset(name, data=np.asarray(value))
-                for name in ('seq', 't_start', 'dt', 'collection_time', 'violation_idx', 'compute_time',
-                             'latency', 'warmup'):
-                    g.attrs[name] = getattr(plan, name)
-            g = f.create_group('events')
-            g.create_dataset('time', data=np.array([e[0] for e in self.events], dtype=float))
-            g.create_dataset('kind', data=np.array([e[1] for e in self.events], dtype=object),
-                             dtype=h5py.string_dtype())
-            g.create_dataset('detail', data=np.array([e[2] for e in self.events], dtype=object),
-                             dtype=h5py.string_dtype())
-            if timing:
-                g = f.create_group('timing')
-                for name, values in timing.items():
-                    g.create_dataset(name, data=np.asarray(values, dtype=float))
-        return path
-
-
-def _attr(value):
-    if isinstance(value, (str, int, float, bool, np.number)):
-        return value
-    if isinstance(value, (list, tuple, np.ndarray)):
-        return np.asarray(value)
-    return str(value)
-
-
-def _git_commit() -> str:
-    try:
-        here = os.path.dirname(os.path.realpath(__file__))
-        return subprocess.run(['git', '-C', here, 'rev-parse', '--short', 'HEAD'], capture_output=True,
-                              text=True, timeout=2).stdout.strip() or 'unknown'
-    except Exception:
-        return 'unknown'
+        for name, values in (timing or {}).items():
+            self.rec.record('timing', name, {'values': np.asarray(values, dtype=float)})
+        return self.rec.save(self.h5_path(path))

@@ -208,6 +208,14 @@ exactly as before.
 
 # The new flight recorder
 
+> **Update (branch `cpp-fast-loop`):** the generic part of this recorder is now the standalone library
+> [flight_recorder](https://github.com/evannsmc/flight_recorder), included as a git submodule in
+> `packages/flight_recorder`. `px4_rta_mm_gpr/flight_log/` is a thin RTA-specific layer on top of it: the tick,
+> wind and gain columns, the plan records, the legacy CSV and the tube helpers. Files now use the library's layout
+> (`streams/ticks`, `streams/wind`, `streams/gains`, `records/plans/<seq>`, `records/timing/<name>`, `events`) and
+> are flushed to disk every 5 s during flight (`--log-autosave`), so a crash loses at most 5 s. `FlightLog` reads
+> both the new files and the earlier layout shown below.
+
 `px4_rta_mm_gpr/flight_log/` replaces the ROS2Logger `LogType`s:
 
 * **In flight:** one preallocated float64 row per control tick (`ColumnBuffer`, grows by doubling),

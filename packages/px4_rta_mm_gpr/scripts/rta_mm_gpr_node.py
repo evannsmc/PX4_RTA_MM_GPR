@@ -590,7 +590,7 @@ class OffboardControl(Node):
         with FlightLog(h5_path) as log:
             csv_path = log.to_legacy_csv(os.path.splitext(h5_path)[0] + '.csv')
         print(f"[flight_log] {h5_path} ({os.path.getsize(h5_path) / 1e6:.1f} MB, {len(self.recorder.ticks)} ticks, "
-              f"{len(self.recorder.plans)} plans)\n[flight_log] legacy CSV: {csv_path}")
+              f"{self.recorder.n_plans} plans)\n[flight_log] legacy CSV: {csv_path}")
         return h5_path
 
     def timing_summary(self) -> str:

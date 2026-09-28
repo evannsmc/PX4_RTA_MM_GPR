@@ -16,6 +16,7 @@ plt.rcParams.update({'pdf.fonttype': 42, 'ps.fonttype': 42, 'font.size': 9,
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parent / 'data' / 'round5'
 sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'px4_rta_mm_gpr'))
+sys.path.insert(0, str(HERE.parents[1] / 'packages' / 'flight_recorder'))  # git submodule
 
 GROUPS = [('r5_tuned', 'Python loop (events executor + process rollouts)', '#2166ac'),
           ('r6_cpp', 'C++ fast loop + Python planner', '#b2182b')]

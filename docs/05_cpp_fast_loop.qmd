@@ -45,6 +45,7 @@ PX4_RTA_MM_GPR/
     px4_rta_mm_gpr/        # the Python package (was the repository root)
     px4_rta_mm_gpr_msgs/   # PlannerStatus, RtaPlan, RtaGains, ControlTick
     px4_rta_mm_gpr_cpp/    # rta_fast_loop, control_law.hpp
+    flight_recorder/       # git submodule: flight-data logging library
 ```
 
 ```bash
