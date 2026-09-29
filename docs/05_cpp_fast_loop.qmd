@@ -136,8 +136,9 @@ safety path. Full per-flight numbers: `docs/data/round5_flights.csv`.
 **After the model fixes of doc 06** (body-frame velocities, 100 Hz PX4 odometry instead of the relay,
 exact row lookup; 2026-09-29), one C++ flight at the defaults (0.25 m certificate): tracking RMSE
 23 mm lateral / 28 mm vertical (was 86 / 50 mm), worst position outside the certified tube 0.12 m
-(was 0.47 m), control period p99 10.06 ms, 4.5 µs per control tick, no uncertified time. The table
-above predates these fixes.
+(was 0.47 m), control period p99 10.06 ms, 4.5 µs per control tick, no uncertified time. With the
+5 cm model-mismatch margin (the default since then): 0 % of the time outside the certified tube,
+tracking 13 / 13 mm, control period p99 10.10 ms. The table above predates these fixes.
 
 **What C++ changed, and what it didn't.** After rounds 2–4, the Python loop already held its
 10 ms period on this 14-core desktop, so the flights look the same. The differences are margin and
