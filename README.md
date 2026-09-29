@@ -20,56 +20,50 @@ embedding systems (Appendix A), all at the same certificate (position within 0.2
 
 ![Escapes from the certified tube](packages/px4_rta_mm_gpr/scripts/data_analysis/figures/comparison_escapes.png)
 
-**Time outside the certified tube** (numerical sim, wind: true state · PX4 SITL: EKF2 estimate):
+**Numerical simulation, drifting wind** (the paper's evolving wind; exact model; 9 wind runs per variant):
 
 | embedding system | **TV-GPR** (this package) | GPR |
 |---|---|---|
-| (68)-(69): first order in *u* and *w* | **A: 0 % · 19 %** (default) | D: 41 % · 65 % |
-| (66)-(67): first order in *u* | **E: 0 % · 20 %** | C: 40 % · 67 % |
-| (64)-(65): no first-order terms | **F: 0.03 % · 20 %** | B: 40 % · 71 % |
+| (68)-(69): first order in *u* and *w* | **A: 0 %** outside, worst 0.9 mm (default) | D: 41 %, worst 0.10 m |
+| (66)-(67): first order in *u* | **E: 0 %**, worst 0.9 mm | C: 40 %, worst 0.29 m |
+| (64)-(65): no first-order terms | **F: 0.03 %**, worst 1.2 mm | B: 40 %, worst 0.28 m |
+
+**PX4 SITL** (3 flights per variant; the Gazebo world has **no wind**, so the GPs only learn a steady
+thrust offset, and SITL tests the model's mismatch with the real vehicle, not the wind model):
 
 | | A | E | F | D | C | B |
 |---|---|---|---|---|---|---|
-| wind model + embedding | TV-GPR + (68) | TV-GPR + (66) | TV-GPR + (64) | GPR + (68) | GPR + (66) | GPR + (64) |
-| numerical: worst excursion outside the tube | **0.9 mm** | **0.9 mm** | **1.2 mm** | 0.10 m | 0.29 m | 0.28 m |
-| SITL: worst excursion outside the tube | **0.12 m** | **0.12 m** | 0.15 m | 0.27 m | 0.80 m | 0.26 m |
-| SITL: tracking RMSE lateral / vertical | **20 / 27 mm** | **20 / 26 mm** | 20 / 30 mm | 24 / 32 mm | 27 / 42 mm | 27 / 42 mm |
-| certified horizon (SITL, median) | 0.54 s | 0.54 s | 0.54 s | 0.78 s | 0.82 s | 0.84 s |
-| one rollout (SITL, median) | 9.0 ms | 6.1 ms | 6.2 ms | 10.0 ms | 5.1 ms | 5.3 ms |
+| wind model + embedding | TV + (68) | TV + (66) | TV + (64) | GPR + (68) | GPR + (66) | GPR + (64) |
+| outside the tube, δ = 0 | 19 % | 20 % | 20 % | 65 % | 67 % | 71 % |
+| **outside the tube, 5 cm margin (default)** | **0 %** | **0 %** | **0 %** | **0 %** | **0 %** | **0.02 %** |
+| certified horizon, 5 cm margin | **0.34 s** | **0.34 s** | **0.34 s** | 0.17 s | 0.29 s | 0.29 s |
+| tracking RMSE lateral / vertical, 5 cm margin | 13 / 18 mm | 13 / 16 mm | 12 / 15 mm | 7 / 9 mm | 11 / 12 mm | 12 / 11 mm |
+| one rollout, 5 cm margin | 3.9 ms | 3.8 ms | 4.0 ms | 3.5 ms | 3.3 ms | 3.4 ms |
 
-* **A static GP looks better and is wrong.** With every embedding system its tubes are about 10× thinner
-  and certify further ahead, but a wind that drifts over time leaves it confidently wrong: in the
-  numerical wind runs the true state is outside its "certified" tube about 40 % of the time, by up to
-  0.29 m, more than the 0.25 m threshold itself.
-* **With the time-varying GP the certificate holds**, with every embedding system: in all numerical wind
-  runs the true state stayed inside its certified tube (worst 0.9-1.2 mm, from the 10 ms integration
-  step), and the TV-GPR variants track best.
+* **A static GP looks better and is wrong when the wind drifts.** With every embedding system its tubes are
+  about 10× thinner and certify further ahead, but it is confidently wrong about a time-varying wind: in the
+  numerical runs the true state is outside its "certified" tube about 40 % of the time, by up to 0.29 m,
+  more than the 0.25 m threshold itself. **With the time-varying GP the certificate holds**, with every
+  embedding system (worst 0.9-1.2 mm, from the 10 ms integration step).
 * **The embedding system barely matters once the GP is right.** With TV-GPR, (68)-(69), (66)-(67) and
   (64)-(65) certify the same horizon with the same tube widths: the GP's growing uncertainty over the
-  look-ahead dominates the tube's growth, and for this vehicle (64)-(65) coincides with (66)-(67). The
-  cheapest, (66)-(67), saves about a third of the rollout time.
-* **In SITL** (at δ = 0) the full PX4 vehicle differs from the planar model in the first moments of each
-  plan, so even the TV-GPR estimates leave the tube about 20 % of the time, but the ranking is the same and
-  the GPR variants are 3.3-3.6× worse with the same embedding. None of the 18 SITL flights needed the LAND backup.
-* **Closing the SITL gap: a 5 cm model-mismatch margin** (now the default, δ ≥ 0.05 m). The escapes happen
-  in the first 0.1 s of each plan, while the tube is millimetres wide; a 5 cm starting box absorbs them:
-
-  | TV-GPR + (68)-(69), PX4 SITL, 3 flights each | δ = 0 | **δ = 0.05 m (default)** | δ = 0.1 m |
-  |---|---|---|---|
-  | time outside the certified tube / worst | 19 % / 0.12 m | **0 % / 1 mm** | 0 % / 0 |
-  | certified horizon (median) / plans in 20 s | 0.54 s / 41 | 0.35 s / 83 | 0.25 s / 98 |
-  | tracking RMSE lateral / vertical | 20 / 27 mm | **13 / 16 mm** | 10 / 11 mm |
-
-  (Raising the threshold to 0.5 m instead barely helps: 16 % outside, worst 0.13 m.)
+  look-ahead dominates the tube's growth, and for this vehicle (64)-(65) coincides with (66)-(67).
+* **In SITL the planar model is the limit, and a 5 cm margin fixes it.** With δ = 0 every variant leaves
+  its tube in the first moments of each plan (the thinner GPR tubes more often); with the default 5 cm
+  model-mismatch margin all six stay inside, and the TV-GPR variants certify the longest (the GPR variants
+  replan up to 1.6× as often, which re-anchors the reference and lowers their tracking error). None of the 36
+  SITL flights needed the LAND backup. SITL cannot show the static GP's failure yet: that needs a
+  time-varying wind in Gazebo.
 
 ![Six tubes from the same start](packages/px4_rta_mm_gpr/scripts/data_analysis/figures/comparison_tubes.png)
 
-Setup: 10 numerical cases per variant (calm, paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds; backup off, so
-every variant flies the full mission) and 3 PX4 SITL flights per variant (backup on); δ = 0 (no margin) for the
-six-variant study. All tables,
-the GP × embedding grids, the two-way effect split and per-flight data:
+Setup: numerical, 10 cases per variant (calm, paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds; backup off, so
+every variant flies the full mission; δ = 0, the model is exact); SITL, 3 flights per variant flown twice
+(δ = 0 and the default 5 cm margin; backup on). All tables, the GP × embedding grids, the two-way effect
+split and per-flight data:
 [`05_embedding_comparison.ipynb`](packages/px4_rta_mm_gpr/scripts/data_analysis/05_embedding_comparison.ipynb).
-Reproduce: `--gp tv|static --embedding uw|u|none` (node) or `SimConfig(gp_epsilon=..., embedding=...)`.
+Reproduce: `--gp tv|static --embedding uw|u|none --model-mismatch-margin 0.05` (node) or
+`SimConfig(gp_epsilon=..., embedding=...)`.
 
 ## Branches
 

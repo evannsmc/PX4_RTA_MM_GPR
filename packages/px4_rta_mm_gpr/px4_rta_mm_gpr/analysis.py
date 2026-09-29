@@ -104,16 +104,17 @@ def comparison_metrics(log: FlightLog, name: Optional[str] = None) -> dict:
     """One row per flight for the embedding / GP comparison: certification, safety (escapes), tracking, cost.
 
     tube_halfwidth_025: mean over plans of the tube's position half-width (max of y, altitude) 0.25 s into the plan
-    (smaller = tighter over-approximation). Warm-up plans (before the RTA phase) are excluded."""
+    (smaller = tighter over-approximation), over the plans still certified at +0.25 s. Warm-up plans (before the RTA
+    phase) are excluded."""
     md = log.metadata
     S = summary(log, name).iloc[0].to_dict()
     t0 = float(md.get('begin_actuator_control', 0.0)) if md.get('platform') != 'numerical_sim' else 0.0
     plans = [log.plan(int(s_)) for s_ in log.plan_seqs]
     plans = [p for p in plans if not p.get('warmup', False) and p['t_start'] >= t0 - 1e-9]
     cert = np.array([certified_rows(p) * p['dt'] for p in plans])
-    k = 25
-    hw = np.array([0.5 * (p['reachable_tube'][min(k, len(p['reachable_tube']) - 1), 5:7]
-                          - p['reachable_tube'][min(k, len(p['reachable_tube']) - 1), 0:2]).max() for p in plans])
+    k = 25   # +0.25 s; plans certified for less than that are skipped (their tube there is uncertified, may diverge)
+    hw = np.array([0.5 * (p['reachable_tube'][k, 5:7] - p['reachable_tube'][k, 0:2]).max()
+                   if certified_rows(p) > k else np.nan for p in plans])
     comp = np.array([p['compute_time'] for p in plans])
     backup = [e for e in log.events.itertuples() if 'backup' in str(e.kind)]
     return dict(flight=S['flight'], gp_epsilon=float(md.get('gp_epsilon', 0.25)), embedding=md.get('embedding', 'uw'),
