@@ -29,7 +29,7 @@ See videos [here](https://gtvault-my.sharepoint.com/:f:/g/personal/egm9_gatech_e
   0 in simulation, 3σ of EKF2's position estimate on hardware (it also widens the tube's initial box). Velocity and
   attitude bounds are not limited. The next rollout starts *before* the current certificate expires. If no certified plan exists for 20 ms,
   the node hands the vehicle to **PX4 LAND**.
-* **Wind:** EKF on the acceleration residual at 40 Hz while the node's own commands fly. The y-wind is learned
+* **Wind:** EKF on the acceleration residual at 100 Hz while the node's own commands fly. The y-wind is learned
   as a function of altitude and the z-wind as a function of lateral position. The GP mean is fed forward into the
   reference thrust.
 * **Concurrency:** five callback groups on a `MultiThreadedExecutor` (or `EventsExecutor`). Rollouts can run in a
@@ -47,7 +47,7 @@ packages/
     px4_rta_mm_gpr/         library: jax_mm_rta (model, GP, rollouts), jax_nr, concurrency, control_kernels,
                             flight_log, sim (numerical simulation), analysis (log analysis)
     scripts/                the node (rta_mm_gpr_node.py, px4_rta_mm_gpr.py) and data_analysis/ (notebooks)
-    launch/                 sim_relay_rta_launch.py
+    launch/                 sim_rta_launch.py
   flight_recorder/          git submodule: flight-data logging library
 tools/run_sitl.sh           PX4 SITL with this project's parameters
 ```
@@ -58,12 +58,12 @@ tools/run_sitl.sh           PX4 SITL with this project's parameters
 git clone --recurse-submodules https://github.com/evannsmc/PX4_RTA_MM_GPR.git   # into <workspace>/
 sudo apt install libhdf5-dev python3-h5py
 pip install --user immrax control imageio-ffmpeg  # see docs/02 for the numpy 1.26 / ROS Jazzy caveats
-colcon build --symlink-install --base-paths PX4_RTA_MM_GPR/packages <other deps: px4_msgs, mocap_msgs, ...>
+colcon build --symlink-install --base-paths PX4_RTA_MM_GPR/packages <other deps: px4_msgs>
 source install/setup.bash
 
 PX4_RTA_MM_GPR/tools/run_sitl.sh                 # terminal 1: PX4 SITL + Gazebo x500 (HEADLESS=1 for no window)
 MicroXRCEAgent udp4 -p 8888                      # terminal 2
-ros2 launch px4_rta_mm_gpr sim_relay_rta_launch.py   # terminal 3 (or: ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --sim --log-file run.log)
+ros2 launch px4_rta_mm_gpr sim_rta_launch.py         # terminal 3 (or: ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --sim --log-file run.log)
 ```
 
 `ros2 run px4_rta_mm_gpr px4_rta_mm_gpr --help` lists every option. The recommended configuration is

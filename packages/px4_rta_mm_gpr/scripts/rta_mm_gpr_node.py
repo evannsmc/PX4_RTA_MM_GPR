@@ -8,10 +8,9 @@ from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
     VehicleStatus, #Import PX4 ROS2-API messages for receiving vehicle state information
-    VehicleOdometry, # EKF2's position variance (position-uncertainty delta of the certificate)
+    VehicleOdometry, VehicleLocalPosition, # state (100 Hz odometry + 50 Hz acceleration), straight from PX4
     RcChannels
 )
-from mocap_msgs.msg import FullState
 
 
 import gc
@@ -254,9 +253,16 @@ class OffboardControl(Node):
             VehicleRatesSetpoint, '/fmu/in/vehicle_rates_setpoint', qos_profile)
 
         # Create subscribers
+        # State straight from PX4 (no relay): vehicle_odometry at 100 Hz (position, velocity, attitude, EKF2 position
+        # variance) builds each sample; vehicle_local_position (50 Hz) supplies the latest acceleration for the wind EKF.
+        # (The mocap_px4_relays full-state relay published on a 25 ms timer behind a rate gate: 25 Hz, gaps to 150 ms.)
         self.state: Optional[VehicleState] = None # latest odometry sample (None until the first message)
+        self.accel: np.ndarray = np.zeros(3)      # latest (ax, ay, az), NED; one assignment per message
         self.vehicle_odometry_subscriber = self.create_subscription(
-            FullState, '/merge_odom_localpos/full_state_relay', self.vehicle_odometry_subscriber_callback, qos_profile,
+            VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odometry_subscriber_callback, qos_profile,
+            callback_group=self.state_group)
+        self.local_position_subscriber = self.create_subscription(
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1', self.local_position_callback, qos_profile,
             callback_group=self.state_group)
 
 
@@ -265,12 +271,8 @@ class OffboardControl(Node):
         # describes GPS, not the mocap setup this certificate is meant for; see docs/04).
         mode = options.position_uncertainty
         self.delta_mode = ('0' if self.sim else 'ekf2') if mode == 'auto' else mode
-        self.position_sigma: Optional[np.ndarray] = None   # (sigma_y, sigma_z) from EKF2, one assignment per message
-        if self.delta_mode == 'ekf2':
-            self.vehicle_odometry_subscriber = self.create_subscription(
-                VehicleOdometry, '/fmu/out/vehicle_odometry', self.ekf2_odometry_callback, qos_profile,
-                callback_group=self.state_group)
-        else:
+        self.position_sigma: Optional[np.ndarray] = None   # (sigma_y, sigma_z) from EKF2 (odometry callback)
+        if self.delta_mode != 'ekf2':
             float(self.delta_mode)  # a fixed value in metres (raises on a typo)
         print(f"Certificate: position bounds within {options.tube_threshold} m + delta of the reference; "
               f"delta = {self.delta_mode if self.delta_mode != 'ekf2' else f'{options.uncertainty_sigmas} x EKF2 sigma'}")
@@ -634,8 +636,10 @@ class OffboardControl(Node):
         # is gone: the ground is now handled explicitly (min_altitude in the certificate + LAND backup).
         z = msg.position[2]
 
-        vx, vy, vz = msg.velocity
-        ax, ay, az = msg.acceleration
+        vx, vy, vz = msg.velocity    # NED (velocity_frame 1)
+        ax, ay, az = self.accel       # latest vehicle_local_position acceleration
+        var = np.asarray(msg.position_variance, dtype=float)
+        self.position_sigma = np.sqrt(np.maximum(var[1:3], 0.0))   # EKF2 (sigma_y, sigma_z) for the certificate's delta
 
         roll, pitch, yaw = R.from_quat(msg.q, scalar_first=True).as_euler('xyz', degrees=False)
         yaw = adjust_yaw(self, yaw)  # Adjust yaw to account for full rotations
@@ -645,15 +649,17 @@ class OffboardControl(Node):
             stamp=self.now(), x=x, y=y, z=z, vx=vx, vy=vy, vz=vz, ax=ax, ay=ay, az=az,
             roll=roll, pitch=pitch, yaw=yaw,
             nr_state_vector=np.array([x, y, z, vx, vy, vz, roll, pitch, yaw]),
-            rta_mm_gpr_state_vector_planar=np.array([y, z, vy, vz, roll]), # px, py, h, v, theta = x
+            # planar model state (py, pz, h, v, theta): h, v are BODY-frame velocities (the model has
+            # ydot = h cos(theta) - v sin(theta), zdot = h sin(theta) + v cos(theta)), i.e. [h; v] = R(theta)^T [vy; vz]
+            rta_mm_gpr_state_vector_planar=np.array([y, z, np.cos(roll) * vy + np.sin(roll) * vz,
+                                                     -np.sin(roll) * vy + np.cos(roll) * vz, roll]),
         )
         self.debug(f"in odom, flat output: {[x, y, z, yaw]}")
         self.update_wind_estimate(self.state)
 
-    def ekf2_odometry_callback(self, msg) -> None:
-        """EKF2's position variance (NED): keep the standard deviations of y and z (one assignment)."""
-        var = np.asarray(msg.position_variance, dtype=float)
-        self.position_sigma = np.sqrt(np.maximum(var[1:3], 0.0))
+    def local_position_callback(self, msg) -> None:
+        """Latest NED acceleration (for the wind EKF's measurement), one assignment."""
+        self.accel = np.array([msg.ax, msg.ay, msg.az])
 
     def position_delta(self) -> np.ndarray:
         """delta (m, py and pz) for the next rollout: the initial box is at least delta wide, the threshold + delta."""

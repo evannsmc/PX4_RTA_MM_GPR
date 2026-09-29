@@ -40,7 +40,6 @@ ax.axis('off')
 
 # outside the node
 PX4 = box(ax, 0.1, 8.0, 2.9, 1.7, 'PX4\n(SITL or hardware)\nuXRCE-DDS bridge', fc='#f0f0f0')
-RELAY = box(ax, 0.1, 5.6, 2.9, 1.5, 'full_state_relay\nmocap_px4_relays: merges\nodometry + local position', fc='#f0f0f0')
 
 # node process
 ax.add_patch(FancyBboxPatch((3.5, -0.1), 9.3, 10.3, boxstyle='round,pad=0.02,rounding_size=0.2', fc='#fbfbfb',
@@ -53,7 +52,7 @@ ax.text(8.55, 9.45, 'shared snapshots (replaced, never mutated)', fontsize=8, st
 G = {}
 G['px4_io'] = box(ax, 3.8, 7.75, 4.1, 1.4, 'px4_io group\nheartbeat 10 Hz, vehicle_status, RC',
                   ec=GROUP_COLORS['px4_io'], lw=1.6)
-G['state'] = box(ax, 3.8, 6.05, 4.1, 1.4, 'state group\nodometry ~40 Hz: VehicleState + wind EKF',
+G['state'] = box(ax, 3.8, 6.05, 4.1, 1.4, 'state group\nodometry 100 Hz: state + wind EKF',
                  ec=GROUP_COLORS['state'], lw=1.6)
 G['control'] = box(ax, 3.8, 4.35, 4.1, 1.4, 'control group\ncontrol law 100 Hz (AOT control_step)',
                    ec=GROUP_COLORS['control'], lw=1.6)
@@ -96,8 +95,7 @@ arrow(ax, right(PX4, 0.35), left(G['px4_io'], 0.35), color='0.25',
       label='status / RC', label_dy=0.05)
 arrow(ax, left(G['px4_io'], -0.3), right(PX4, -0.3), color=GROUP_COLORS['px4_io'],
       label='heartbeat, mode, arm', label_dy=-0.38)
-arrow(ax, (1.55, 8.0), (1.55, 7.1), color='0.25')
-arrow(ax, right(RELAY), left(G['state']), color='0.25', label='FullState', label_dy=0.05)
+arrow(ax, (2.2, 8.0), left(G['state']), color='0.25', label='odometry 100 Hz,\nlocal position 50 Hz', label_pos=0.45, label_dy=-0.55)
 arrow(ax, left(G['control']), (2.75, 8.0), color=GROUP_COLORS['control'])
 ax.text(2.15, 4.95, 'body-rate\nsetpoints 100 Hz', color=GROUP_COLORS['control'], fontsize=7, ha='center', va='center')
 
