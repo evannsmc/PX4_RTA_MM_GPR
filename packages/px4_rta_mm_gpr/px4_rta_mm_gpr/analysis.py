@@ -90,6 +90,42 @@ def tube_escapes(log: FlightLog) -> pd.DataFrame:
     return pd.DataFrame({'time': t, 'certified': cert, 'escape': np.where(cert, out, 0.0)})
 
 
+VARIANTS = {   # the paper comparison: name -> (GP forgetting epsilon, embedding system)
+    'A: TV-GPR + (68)-(69)': (0.25, 'uw'),
+    'D: GPR + (68)-(69)': (0.0, 'uw'),
+    'C: GPR + (66)-(67)': (0.0, 'u'),
+    'B: GPR + (64)-(65)': (0.0, 'none'),
+}
+
+
+def comparison_metrics(log: FlightLog, name: Optional[str] = None) -> dict:
+    """One row per flight for the embedding / GP comparison: certification, safety (escapes), tracking, cost.
+
+    tube_halfwidth_025: mean over plans of the tube's position half-width (max of y, altitude) 0.25 s into the plan
+    (smaller = tighter over-approximation). Warm-up plans (before the RTA phase) are excluded."""
+    md = log.metadata
+    S = summary(log, name).iloc[0].to_dict()
+    t0 = float(md.get('begin_actuator_control', 0.0)) if md.get('platform') != 'numerical_sim' else 0.0
+    plans = [log.plan(int(s_)) for s_ in log.plan_seqs]
+    plans = [p for p in plans if not p.get('warmup', False) and p['t_start'] >= t0 - 1e-9]
+    cert = np.array([certified_rows(p) * p['dt'] for p in plans])
+    k = 25
+    hw = np.array([0.5 * (p['reachable_tube'][min(k, len(p['reachable_tube']) - 1), 5:7]
+                          - p['reachable_tube'][min(k, len(p['reachable_tube']) - 1), 0:2]).max() for p in plans])
+    comp = np.array([p['compute_time'] for p in plans])
+    backup = [e for e in log.events.itertuples() if 'backup' in str(e.kind)]
+    return dict(flight=S['flight'], gp_epsilon=float(md.get('gp_epsilon', 0.25)), embedding=md.get('embedding', 'uw'),
+                plans=len(plans), cert_med_s=np.median(cert), cert_p5_s=np.percentile(cert, 5), cert_min_s=cert.min(),
+                zero_cert_plans=int((cert <= 0.011).sum()), uncertified_pct=S.get('uncertified_pct'),
+                escape_pct=S.get('escape_pct'), escape_max_m=S.get('escape_max_m'),
+                tube_halfwidth_025=float(np.nanmean(hw)), rmse_y=S.get('rmse_y'), rmse_altitude=S.get('rmse_altitude'),
+                final_altitude=S.get('final_altitude'), lowest_altitude=S.get('lowest_altitude'),
+                lowest_certified_tube=S.get('lowest_certified_tube'), max_attitude_deg=S.get('max_attitude_deg'),
+                rollout_ms_med=1e3 * np.median(comp), rollout_ms_p99=1e3 * np.percentile(comp, 99),
+                control_period_p99_ms=S.get('period_p99_ms'),
+                backup_at_s=(float(backup[0].time) if backup else np.nan))
+
+
 def rollout_times(log: FlightLog) -> np.ndarray:
     if 'rollout_compute' in log.timing:
         return np.asarray(log.timing['rollout_compute'], dtype=float)
