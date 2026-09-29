@@ -90,8 +90,10 @@ def tube_escapes(log: FlightLog) -> pd.DataFrame:
     return pd.DataFrame({'time': t, 'certified': cert, 'escape': np.where(cert, out, 0.0)})
 
 
-VARIANTS = {   # the paper comparison: name -> (GP forgetting epsilon, embedding system)
-    'A: TV-GPR + (68)-(69)': (0.25, 'uw'),
+VARIANTS = {   # the paper comparison, GP x embedding system: name -> (GP forgetting epsilon, embedding)
+    'A: TV-GPR + (68)-(69)': (0.25, 'uw'),   # this package's default
+    'E: TV-GPR + (66)-(67)': (0.25, 'u'),
+    'F: TV-GPR + (64)-(65)': (0.25, 'none'),
     'D: GPR + (68)-(69)': (0.0, 'uw'),
     'C: GPR + (66)-(67)': (0.0, 'u'),
     'B: GPR + (64)-(65)': (0.0, 'none'),
