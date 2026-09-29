@@ -13,34 +13,50 @@ See videos [here](https://gtvault-my.sharepoint.com/:f:/g/personal/egm9_gatech_e
 
 ## Key result: the time-varying GP is what keeps the certificate true
 
-The certified tube is only as good as its disturbance model. We compared the tube of this package
-(**time-varying GP** + the paper's first-order embedding system (68)-(69)) against a **time-invariant GP**
-with each of the paper's three embedding systems, all at the same certificate (position within 0.25 m of
-the reference, 0.3 m floor), and measured how often the vehicle actually **left** its certified tube:
+The certified tube is only as good as its disturbance model. We computed the tube six ways, the
+**time-varying GP (TV-GPR)** of this package and a **time-invariant GP (GPR)**, each with the paper's three
+embedding systems (Appendix A), all at the same certificate (position within 0.25 m of the reference,
+0.3 m floor), and measured how often the vehicle actually **left** its certified tube:
 
 ![Escapes from the certified tube](packages/px4_rta_mm_gpr/scripts/data_analysis/figures/comparison_escapes.png)
 
-| | **A: TV-GPR + (68)-(69)** (this package) | D: GPR + (68)-(69) | C: GPR + (66)-(67) | B: GPR + (64)-(65) |
-|---|---|---|---|---|
-| numerical sim, wind: time outside the certified tube (true state) | **0 %** | 41 % | 40 % | 40 % |
-| numerical sim, wind: worst excursion | **0.9 mm** | 0.10 m | 0.29 m | 0.28 m |
-| PX4 SITL: time outside the certified tube (EKF2 estimate) | **19 %** | 65 % | 67 % | 71 % |
-| PX4 SITL: worst excursion | **0.12 m** | 0.27 m | 0.80 m | 0.26 m |
-| PX4 SITL: tracking RMSE lateral / vertical | **20 / 27 mm** | 24 / 32 mm | 27 / 42 mm | 27 / 42 mm |
-| certified horizon (SITL, median) | 0.54 s | 0.78 s | 0.82 s | 0.84 s |
+**Time outside the certified tube** (numerical sim, wind: true state · PX4 SITL: EKF2 estimate):
 
-* **A static GP looks better and is wrong.** Its tubes are about 10× thinner and certify further ahead, but
-  a wind that drifts over time leaves it confidently wrong: the true state leaves its "certified" tube on
-  about 40 % of the time in the numerical runs, by up to 0.29 m, more than the 0.25 m threshold itself.
-* **With the time-varying GP the certificate holds**: in every numerical wind run the true state stayed
-  inside its certified tube (largest excursion 0.9 mm, from the 10 ms integration step), and it tracks best.
-* **In SITL** the full PX4 vehicle differs from the planar model (fast descent), so even A's estimate
-  leaves the tube 19 % of the time, but the ranking is the same and the GPR variants are 3.4-3.7× worse.
-  None of the 12 SITL flights needed the LAND backup.
+| embedding system | **TV-GPR** (this package) | GPR |
+|---|---|---|
+| (68)-(69): first order in *u* and *w* | **A: 0 % · 19 %** (default) | D: 41 % · 65 % |
+| (66)-(67): first order in *u* | **E: 0 % · 20 %** | C: 40 % · 67 % |
+| (64)-(65): no first-order terms | **F: 0.03 % · 20 %** | B: 40 % · 71 % |
 
-Setup: 10 numerical wind cases (calm, paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds; backup off, so every
-variant flies the full mission) and 3 PX4 SITL flights per variant (backup on); δ = 0. Tables, per-flight
-data and the tube comparison figure:
+| | A | E | F | D | C | B |
+|---|---|---|---|---|---|---|
+| wind model + embedding | TV-GPR + (68) | TV-GPR + (66) | TV-GPR + (64) | GPR + (68) | GPR + (66) | GPR + (64) |
+| numerical: worst excursion outside the tube | **0.9 mm** | **0.9 mm** | **1.2 mm** | 0.10 m | 0.29 m | 0.28 m |
+| SITL: worst excursion outside the tube | **0.12 m** | **0.12 m** | 0.15 m | 0.27 m | 0.80 m | 0.26 m |
+| SITL: tracking RMSE lateral / vertical | **20 / 27 mm** | **20 / 26 mm** | 20 / 30 mm | 24 / 32 mm | 27 / 42 mm | 27 / 42 mm |
+| certified horizon (SITL, median) | 0.54 s | 0.54 s | 0.54 s | 0.78 s | 0.82 s | 0.84 s |
+| one rollout (SITL, median) | 9.0 ms | 6.1 ms | 6.2 ms | 10.0 ms | 5.1 ms | 5.3 ms |
+
+* **A static GP looks better and is wrong.** With every embedding system its tubes are about 10× thinner
+  and certify further ahead, but a wind that drifts over time leaves it confidently wrong: in the
+  numerical wind runs the true state is outside its "certified" tube about 40 % of the time, by up to
+  0.29 m, more than the 0.25 m threshold itself.
+* **With the time-varying GP the certificate holds**, with every embedding system: in all numerical wind
+  runs the true state stayed inside its certified tube (worst 0.9-1.2 mm, from the 10 ms integration
+  step), and the TV-GPR variants track best.
+* **The embedding system barely matters once the GP is right.** With TV-GPR, (68)-(69), (66)-(67) and
+  (64)-(65) certify the same horizon with the same tube widths: the GP's growing uncertainty over the
+  look-ahead dominates the tube's growth, and for this vehicle (64)-(65) coincides with (66)-(67). The
+  cheapest, (66)-(67), saves about a third of the rollout time.
+* **In SITL** the full PX4 vehicle differs from the planar model (fast descent), so even the TV-GPR
+  estimates leave the tube about 20 % of the time, but the ranking is the same and the GPR variants are
+  3.3-3.6× worse with the same embedding. None of the 18 SITL flights needed the LAND backup.
+
+![Six tubes from the same start](packages/px4_rta_mm_gpr/scripts/data_analysis/figures/comparison_tubes.png)
+
+Setup: 10 numerical cases per variant (calm, paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds; backup off, so
+every variant flies the full mission) and 3 PX4 SITL flights per variant (backup on); δ = 0. All tables,
+the GP × embedding grids, the two-way effect split and per-flight data:
 [`05_embedding_comparison.ipynb`](packages/px4_rta_mm_gpr/scripts/data_analysis/05_embedding_comparison.ipynb).
 Reproduce: `--gp tv|static --embedding uw|u|none` (node) or `SimConfig(gp_epsilon=..., embedding=...)`.
 
