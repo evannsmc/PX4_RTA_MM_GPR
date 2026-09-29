@@ -48,14 +48,25 @@ embedding systems (Appendix A), all at the same certificate (position within 0.2
   (64)-(65) certify the same horizon with the same tube widths: the GP's growing uncertainty over the
   look-ahead dominates the tube's growth, and for this vehicle (64)-(65) coincides with (66)-(67). The
   cheapest, (66)-(67), saves about a third of the rollout time.
-* **In SITL** the full PX4 vehicle differs from the planar model (fast descent), so even the TV-GPR
-  estimates leave the tube about 20 % of the time, but the ranking is the same and the GPR variants are
-  3.3-3.6× worse with the same embedding. None of the 18 SITL flights needed the LAND backup.
+* **In SITL** (at δ = 0) the full PX4 vehicle differs from the planar model in the first moments of each
+  plan, so even the TV-GPR estimates leave the tube about 20 % of the time, but the ranking is the same and
+  the GPR variants are 3.3-3.6× worse with the same embedding. None of the 18 SITL flights needed the LAND backup.
+* **Closing the SITL gap: a 5 cm model-mismatch margin** (now the default, δ ≥ 0.05 m). The escapes happen
+  in the first 0.1 s of each plan, while the tube is millimetres wide; a 5 cm starting box absorbs them:
+
+  | TV-GPR + (68)-(69), PX4 SITL, 3 flights each | δ = 0 | **δ = 0.05 m (default)** | δ = 0.1 m |
+  |---|---|---|---|
+  | time outside the certified tube / worst | 19 % / 0.12 m | **0 % / 1 mm** | 0 % / 0 |
+  | certified horizon (median) / plans in 20 s | 0.54 s / 41 | 0.35 s / 83 | 0.25 s / 98 |
+  | tracking RMSE lateral / vertical | 20 / 27 mm | **13 / 16 mm** | 10 / 11 mm |
+
+  (Raising the threshold to 0.5 m instead barely helps: 16 % outside, worst 0.13 m.)
 
 ![Six tubes from the same start](packages/px4_rta_mm_gpr/scripts/data_analysis/figures/comparison_tubes.png)
 
 Setup: 10 numerical cases per variant (calm, paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds; backup off, so
-every variant flies the full mission) and 3 PX4 SITL flights per variant (backup on); δ = 0. All tables,
+every variant flies the full mission) and 3 PX4 SITL flights per variant (backup on); δ = 0 (no margin) for the
+six-variant study. All tables,
 the GP × embedding grids, the two-way effect split and per-flight data:
 [`05_embedding_comparison.ipynb`](packages/px4_rta_mm_gpr/scripts/data_analysis/05_embedding_comparison.ipynb).
 Reproduce: `--gp tv|static --embedding uw|u|none` (node) or `SimConfig(gp_epsilon=..., embedding=...)`.
@@ -74,8 +85,8 @@ Reproduce: `--gp tv|static --embedding uw|u|none` (node) or `SimConfig(gp_epsilo
   100 Hz body-rate setpoints to PX4 offboard.
 * **Certification:** each rollout integrates an interval embedding of the planar dynamics with the GP wind
   bounds, and certifies the reference until the tube's **position** bounds (y, altitude) are more than 0.25 m + δ from
-  the reference position or the tube dips below a **ground floor** (0.3 m). δ is the position-estimate uncertainty:
-  0 in simulation, 3σ of EKF2's position estimate on hardware (it also widens the tube's initial box). Velocity and
+  the reference position or the tube dips below a **ground floor** (0.3 m). δ = max(model-mismatch margin 0.05 m,
+  position-estimate uncertainty: 0 in SITL, 3σ of EKF2 on hardware); it also widens the tube's initial box. Velocity and
   attitude bounds are not limited. The next rollout starts *before* the current certificate expires. If no certified plan exists for 20 ms,
   the node hands the vehicle to **PX4 LAND**.
 * **Wind:** EKF on the acceleration residual at 100 Hz while the node's own commands fly. The y-wind is learned

@@ -103,6 +103,9 @@ def main():
                         help="delta added to the tube threshold (and the minimum initial-box half-width) in y and z: "
                              "'auto' (sim: 0, hardware: ekf2), 'ekf2' (EKF2 position standard deviation x "
                              "--uncertainty-sigmas, per axis), or a fixed value in metres")
+    parser.add_argument("--model-mismatch-margin", type=float, default=0.05,
+                        help="floor on delta (m): covers the planar model's short-term mismatch with the real vehicle "
+                             "(0 = trust the model exactly)")
     parser.add_argument("--uncertainty-sigmas", type=float, default=3.0,
                         help="standard deviations of EKF2's position estimate that make up delta")
     parser.add_argument("--gp", choices=['tv', 'static'], default='tv',
@@ -161,6 +164,7 @@ def main():
                              tube_threshold=args.tube_threshold,
                              position_uncertainty=args.position_uncertainty,
                              uncertainty_sigmas=args.uncertainty_sigmas,
+                             model_mismatch_margin=args.model_mismatch_margin,
                              backup=args.backup,
                              backup_grace=args.backup_grace,
                              ramp_speed_y=args.ramp_speed_y,

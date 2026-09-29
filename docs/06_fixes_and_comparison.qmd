@@ -15,6 +15,8 @@ date: 2026-09-29
   about 40 % of the time, by up to 0.29 m.
 * With the time-varying GP the three embedding systems certify the same horizon with the same tubes;
   (66)-(67) is the cheapest (about a third less compute per rollout).
+* In SITL a **5 cm model-mismatch margin** on $\delta$ (now the default) takes the time the vehicle spends
+  outside its certified tube from 19 % to 0 %, at the price of a shorter certified horizon (0.35 s).
 
 # The five fixes
 
@@ -39,17 +41,32 @@ vehicle's position is outside the certified box of the row in use: the true stat
 simulation, the EKF2 estimate in SITL and on hardware. A certificate that is correct has no escapes
 beyond the 10 ms integration step of the tube (about 1 mm).
 
-**Still open.** In SITL, the TV-GPR variants still leave the tube about 20 % of the time (up to
-0.12 m), concentrated in the fast descent after the RTA takes over. The excursion correlates with
-speed; aerodynamic drag is weak in the estimated wind ($-0.08$ N per m/s), and the steady $-1$ N in the
-vertical wind is the thrust-map offset of doc 04. The remaining mismatch is between the planar model
-and the full PX4 vehicle (rate-loop dynamics, out-of-plane motion); it affects every variant equally.
+**The remaining SITL gap, and the model-mismatch margin.** With $\delta = 0$ the TV-GPR flights
+still leave the tube about 20 % of the time (up to 0.12 m). The escapes happen in the **first 0.1 s of
+each plan** (40-46 % of those ticks, about 1 % once a plan is older than 0.4 s), while the tube, which
+starts from the estimated state with a ±0.5 mm box, is millimetres wide: in its first moments the real
+vehicle departs from the planar model's prediction (rate-loop lag, out-of-plane motion; drag is weak,
+$-0.08$ N per m/s). The threshold does not reach this part of the tube: at 0.5 m instead of 0.25 m the
+time outside is 16 % (worst 0.13 m). A **model-mismatch margin** on $\delta$ does, and is now the default
+(`--model-mismatch-margin 0.05`: $\delta = \max(0.05\,\text{m}, \text{estimate uncertainty})$):
+
+| TV-GPR + (68)-(69), PX4 SITL, 3 flights each | $\delta = 0$ | **$\delta = 0.05$ m** | $\delta = 0.1$ m |
+|----------------|------|------|------|
+| time outside the certified tube / worst | 19 % / 0.12 m | **0 % / 1 mm** | 0 % / 0 |
+| outside in a plan's first 0.1 s | 46 % | 0 % | 0 % |
+| certified horizon, median / 5th percentile | 0.54 / 0.42 s | 0.35 / 0.28 s | 0.25 / 0.21 s |
+| plans in 20 s | 41 | 83 | 98 |
+| tracking RMSE lateral / vertical | 20 / 27 mm | 13 / 16 mm | 10 / 11 mm |
+
+The price is a shorter horizon and twice the replanning (a rollout takes about 5 ms, so the margin to
+the 0.35 s horizon stays large); tracking improves partly because the reference is re-anchored at the
+vehicle twice as often. The numerical simulation keeps $\delta = 0$: its model is the vehicle.
 
 # The comparison
 
 Two wind models (TV-GPR, $\epsilon = 0.25$; GPR = TVGPR with $\epsilon = 0$) × the paper's three
 embedding systems (Appendix A), all at the same certificate: position within 0.25 m of the reference,
-0.3 m floor, $\delta = 0$. Numerical closed loop: 10 cases per variant (calm, paper winds ×0.3 / ×0.6 /
+0.3 m floor, $\delta = 0$ (no margin; the comparison predates it and concerns the GP and the embedding). Numerical closed loop: 10 cases per variant (calm, paper winds ×0.3 / ×0.6 /
 ×1.0 with 3 seeds), backup off. PX4 SITL: 3 flights per variant, backup on.
 
 Time outside the certified tube (numerical wind runs, true state · SITL, EKF2 estimate):

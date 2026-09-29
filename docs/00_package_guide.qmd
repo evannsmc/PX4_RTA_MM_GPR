@@ -154,9 +154,9 @@ and pip packages: `jax`, `immrax`, `control`, `scipy`, `h5py`, `pandas`,
    bounds (mean ± 3σ plus a Lipschitz buffer). It stops at the **first row that fails the certificate**
    plus a 1 s margin (early exit);
 5. the certificate is **spatial**: a row fails when the tube's position bounds ($p_y$ or $p_z$) are more
-   than 0.25 m + δ from the reference position, or the tube reaches the 0.3 m floor. δ is the
-   position-estimate uncertainty carried by the request (0 in sim, 3σ of EKF2 on hardware); it also widens
-   the initial box (doc 04).
+   than 0.25 m + δ from the reference position, or the tube reaches the 0.3 m floor. δ, carried by the
+   request, is max(model-mismatch margin 0.05 m, position-estimate uncertainty: 0 in SITL, 3σ of EKF2 on
+   hardware); it also widens the initial box (docs 04, 06).
 
 ## Wind and gains (state and estimation groups)
 

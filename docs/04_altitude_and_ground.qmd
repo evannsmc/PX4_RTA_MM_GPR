@@ -197,6 +197,11 @@ the node subscribes to `/fmu/out/vehicle_odometry` and uses $\delta = n\sigma$ p
 traced input of the compiled rollout, so $\delta$ can change every plan without recompiling; each plan
 stores the $\delta$ it used.
 
+**Model-mismatch margin (2026-09-29).** $\delta$ also has a floor, `--model-mismatch-margin` (default
+0.05 m): $\delta = \max(0.05\,\text{m}, \text{estimate uncertainty})$. It covers the planar model's
+short-term mismatch with the real vehicle, not the sensor; in SITL it takes the time spent outside the
+certified tube from 19 % to 0 % (doc 06).
+
 EKF2's variance comes from its configured noise parameters (for motion capture, `EKF2_EVP_NOISE`), not
 from a measurement of the error: set them to the motion-capture system's real accuracy, or $\delta$ will
 be too large (or too small).

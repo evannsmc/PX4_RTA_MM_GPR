@@ -65,6 +65,8 @@ class RuntimeOptions:
     tube_threshold: float = 0.25         # (m) certified tubes: position bounds (py, pz) within this (+ delta) of the reference
     position_uncertainty: str = 'auto'   # delta: 'auto' (sim 0, hardware 'ekf2'), 'ekf2', or a fixed value in metres
     uncertainty_sigmas: float = 3.0      # delta = this many EKF2 standard deviations (per axis)
+    model_mismatch_margin: float = 0.05  # (m) floor on delta: covers the planar model's short-term mismatch with the
+                                         # real vehicle (SITL: 19 % of certified time outside the tube with 0, 0 % with 0.05)
     backup: str = 'land'                 # 'land': PX4 LAND when no certified plan exists; 'none': keep flying
     backup_grace: float = 0.02           # (s) how long a plan may be expired before the backup engages
     thrust_limits_mass_scaled: bool = True # RTA thrust limits as fractions of hover thrust (hardware ratios)
@@ -275,7 +277,8 @@ class OffboardControl(Node):
         if self.delta_mode != 'ekf2':
             float(self.delta_mode)  # a fixed value in metres (raises on a typo)
         print(f"Certificate: position bounds within {options.tube_threshold} m + delta of the reference; "
-              f"delta = {self.delta_mode if self.delta_mode != 'ekf2' else f'{options.uncertainty_sigmas} x EKF2 sigma'}")
+              f"delta = max({options.model_mismatch_margin} m model-mismatch margin, "
+              f"{self.delta_mode if self.delta_mode != 'ekf2' else f'{options.uncertainty_sigmas} x EKF2 sigma'})")
 
         self.in_offboard_mode: bool = False
         self.armed: bool = False
@@ -373,6 +376,7 @@ class OffboardControl(Node):
             gp_feedforward=options.gp_feedforward, min_altitude=options.min_altitude,
             gp=options.gp, gp_epsilon=self.rollout_config.gp_epsilon, embedding=options.embedding,
             position_uncertainty=self.delta_mode, uncertainty_sigmas=options.uncertainty_sigmas,
+            model_mismatch_margin=options.model_mismatch_margin,
             backup=options.backup, backup_grace=options.backup_grace,
             ramp_speed_y=options.ramp_speed_y, ramp_speed_z=options.ramp_speed_z))
 
@@ -662,13 +666,18 @@ class OffboardControl(Node):
         self.accel = np.array([msg.ax, msg.ay, msg.az])
 
     def position_delta(self) -> np.ndarray:
-        """delta (m, py and pz) for the next rollout: the initial box is at least delta wide, the threshold + delta."""
+        """delta (m, py and pz) for the next rollout: the initial box is at least delta wide, the threshold + delta.
+
+        delta = max(model-mismatch margin, position-estimate uncertainty). The margin covers how far the real vehicle
+        departs from the planar model's prediction in the first moments of a plan (rate-loop lag, out-of-plane
+        motion); the estimate uncertainty is 0 in SITL by default and 3 sigma of EKF2 on hardware."""
+        margin = self.options.model_mismatch_margin
         if self.delta_mode != 'ekf2':
-            return np.full(2, float(self.delta_mode))
+            return np.full(2, max(margin, float(self.delta_mode)))
         sigma = self.position_sigma
         if sigma is None:   # no EKF2 variance yet: nothing can be certified (safe; it arrives long before the RTA phase)
             return np.full(2, np.inf)
-        return self.options.uncertainty_sigmas * sigma
+        return np.maximum(margin, self.options.uncertainty_sigmas * sigma)
 
     def our_commands_fly(self, t: float) -> bool:
         """True while the vehicle is flown by this node's body-rate commands (RTA phase, offboard, plan ready)."""
