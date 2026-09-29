@@ -4,6 +4,12 @@ subtitle: "What changed relative to the original single-threaded node (tag `arch
 date: 2026-09-27
 ---
 
+::: {.callout-note}
+**Superseded (2026-09-29):** the node no longer uses the `mocap_px4_relays` relay. It reads PX4's
+`vehicle_odometry` directly at 100 Hz, and the planar state uses body-frame velocities. See doc 06.
+This document records the state of the code at the time.
+:::
+
 # Summary
 
 The node's control loop used to share one thread with the reachability rollouts, a stop-the-world

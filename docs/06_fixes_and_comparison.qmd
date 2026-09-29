@@ -1,0 +1,86 @@
+---
+title: "Model fixes and the GP / embedding comparison"
+subtitle: "Five fixes found while comparing the paper's embedding systems, and what the comparison shows"
+date: 2026-09-29
+---
+
+# Summary
+
+* Five defects were found and fixed while setting up the comparison. Fixes 1, 2, 4 and 5 were also
+  present in the code the paper's hardware flights used (tag `archive/main-2026-05-02`), and in the code
+  of the paper's SITL runs.
+* **The GP decides whether the certificate is true; the embedding system barely matters here.** With
+  the time-varying GP every embedding system keeps the vehicle inside its certified tube (0 % of the
+  time outside in the numerical runs); with a time-invariant GP every embedding system is violated
+  about 40 % of the time, by up to 0.29 m.
+* With the time-varying GP the three embedding systems certify the same horizon with the same tubes;
+  (66)-(67) is the cheapest (about a third less compute per rollout).
+
+# The five fixes
+
+| | what was wrong | effect | fix |
+|-|--------|--------|--------|
+| 1 | the embedding used $+[M_u]K$, but the controller applies $u = u_r - K(x - x_r)$ | the tube modelled the wrong closed loop (looser than needed) | $K_p = -K$ in (66)-(69); certifies 0.45-0.62 s instead of 0.40-0.53 s on the same plans |
+| 2 | the dynamics' Jacobian was taken over $w \in \mu(x_r) \pm s$ only | the $\partial/\partial\theta$ entries depend on $w$; the domain must contain every disturbance the box can produce | domain $[\underline\gamma, \overline\gamma]$ over the box, for all variants |
+| 3 | `RolloutPlan.index_at` truncated exact row times ($0.03/0.01 = 2.999\ldots \to 2$) | 45 % of numerical ticks used the previous row (controller and metrics) | $+10^{-6}$ row tolerance (Python and C++) |
+| 4 | the planar state's $h, v$ were filled with **inertial** $(v_y, v_z)$; the model defines them in the **body** frame | up to 1.7 m/s off at 30° roll, in the tube's start state and the RTA feedback | $[h; v] = R(\theta)^\top [v_y; v_z]$ (Python and C++) |
+| 5 | the state came from the `mocap_px4_relays` relay: a 25 ms timer behind a 50 Hz rate gate that local position (exactly 50 Hz) keeps failing | 25 Hz with gaps up to 150 ms, i.e. stale state | the node and the C++ loop read `/fmu/out/vehicle_odometry` (100 Hz) directly |
+
+Effect of fixes 4 and 5 on a default SITL flight:
+
+| | before | + body-frame $h, v$ | + 100 Hz PX4 odometry |
+|----------|-----|-----|-----|
+| tracking RMSE lateral / vertical | 88 / 67 mm | 28 / 43 mm | **20 / 32 mm** |
+| worst position outside the certified tube | 0.45 m | 0.21 m | **0.11 m** |
+| C++ fast loop, RMSE lateral / vertical | 86 / 50 mm | | **23 / 28 mm** |
+
+**New metric: escapes.** `analysis.tube_escapes` measures, at every certified control tick, how far the
+vehicle's position is outside the certified box of the row in use: the true state in the numerical
+simulation, the EKF2 estimate in SITL and on hardware. A certificate that is correct has no escapes
+beyond the 10 ms integration step of the tube (about 1 mm).
+
+**Still open.** In SITL, the TV-GPR variants still leave the tube about 20 % of the time (up to
+0.12 m), concentrated in the fast descent after the RTA takes over. The excursion correlates with
+speed; aerodynamic drag is weak in the estimated wind ($-0.08$ N per m/s), and the steady $-1$ N in the
+vertical wind is the thrust-map offset of doc 04. The remaining mismatch is between the planar model
+and the full PX4 vehicle (rate-loop dynamics, out-of-plane motion); it affects every variant equally.
+
+# The comparison
+
+Two wind models (TV-GPR, $\epsilon = 0.25$; GPR = TVGPR with $\epsilon = 0$) × the paper's three
+embedding systems (Appendix A), all at the same certificate: position within 0.25 m of the reference,
+0.3 m floor, $\delta = 0$. Numerical closed loop: 10 cases per variant (calm, paper winds ×0.3 / ×0.6 /
+×1.0 with 3 seeds), backup off. PX4 SITL: 3 flights per variant, backup on.
+
+Time outside the certified tube (numerical wind runs, true state · SITL, EKF2 estimate):
+
+| embedding system | **TV-GPR** | GPR |
+|---|---|---|
+| (68)-(69): first order in $u$ and $w$ | **A: 0 % · 19 %** (default) | D: 41 % · 65 % |
+| (66)-(67): first order in $u$ | **E: 0 % · 20 %** | C: 40 % · 67 % |
+| (64)-(65): no first-order terms | **F: 0.03 % · 20 %** | B: 40 % · 71 % |
+
+| | A | E | F | D | C | B |
+|---------------|----|----|----|----|----|----|
+| numerical: worst excursion | 0.9 mm | 0.9 mm | 1.2 mm | 0.10 m | 0.29 m | 0.28 m |
+| numerical: certified horizon (median) | 0.59 s | 0.59 s | 0.59 s | 0.78 s | 0.80 s | 0.70 s |
+| numerical: tube half-width at +0.25 s | 26 mm | 26 mm | 25 mm | 2.6 mm | 2.5 mm | 2.4 mm |
+| numerical: rollout | 6.9 ms | 4.3 ms | 6.8 ms | 7.0 ms | 6.1 ms | 6.2 ms |
+| SITL: worst excursion | 0.12 m | 0.12 m | 0.15 m | 0.27 m | 0.80 m | 0.26 m |
+| SITL: tracking RMSE lateral / vertical (mm) | 20 / 27 | 20 / 26 | 20 / 30 | 24 / 32 | 27 / 42 | 27 / 42 |
+
+**Why the GP matters.** The time-invariant GP's uncertainty stays small near its 9 observations, so
+its tubes are about 10× thinner and certify further ahead; but the wind drifts over time, so the GP is
+confidently wrong and the real vehicle leaves the "certified" tube. The TV-GPR's forgetting grows the
+uncertainty over the look-ahead, which is exactly what keeps the tube honest.
+
+**Why the embedding barely matters.** With TV-GPR the growth of $\sigma$ along the look-ahead
+dominates the tube's growth, so the first-order disturbance term of (68)-(69) buys no measurable
+tightening over (66)-(67); and for this vehicle (64)-(65) coincides with (66)-(67), because the inputs
+enter through a constant selector matrix: $[M_u](K[e]) = ([M_u]K)[e]$. A benefit of the first-order
+terms would need a disturbance whose mean varies across the tube much more than its uncertainty grows
+along it.
+
+Data, tables (GP × embedding grids, two-way effect split), per-flight results and figures:
+`packages/px4_rta_mm_gpr/scripts/data_analysis/05_embedding_comparison.ipynb`. Reproduce with
+`--gp tv|static --embedding uw|u|none` (node) or `SimConfig(gp_epsilon=..., embedding=...)`.

@@ -23,6 +23,7 @@ documents go deep on one topic each:
 | 02 | the multithreaded node: options, benchmarks, flight recorder |
 | 03 | AOT compilation, early-exit rollouts, wind estimation, what caused the crashes |
 | 04 | GP feedforward, ground floor, LAND backup, the spatial certificate |
+| 06 | five model fixes (feedback sign, Jacobian domain, row lookup, body-frame velocities, 100 Hz state) and the TV-GPR / GPR × embedding-system comparison |
 | 05 (`cpp-version`) | the C++ fast loop |
 
 Code references are `path:line` relative to `packages/px4_rta_mm_gpr/` unless stated otherwise.
@@ -493,6 +494,7 @@ the two star imports left from the original code; `__all__` in each `__init__.py
 | to … | change |
 |------|---------|
 | add a command-line option | `argparse` in `scripts/px4_rta_mm_gpr.py`, a field in `RuntimeOptions`, use `self.options.<name>` |
+| compare wind models / embedding systems | `--gp tv\|static`, `--embedding uw\|u\|none` (node); `SimConfig(gp_epsilon=..., embedding=...)`; notebook 05 |
 | change what the certificate tests | `_row_fails` and `collection_id_jax` (`jax_mm_rta/mm_rta.py`), `tube_violation` (`analysis.py`), the test in `test/test_sim_analysis.py` |
 | log a new per-tick value | `TICK_COLUMNS` and `tick()` in `flight_log/recorder.py` (same order) |
 | add a new periodic job | a timer in a callback group; if it writes shared state, publish it as one immutable object |

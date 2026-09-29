@@ -142,5 +142,7 @@ timing, tubes, videos of every plan's reachable tube with the GPs, numerical stu
 3. `03_compilation_rollouts_wind.pdf`: AOT compilation, early-exit rollouts, wind estimation, what caused the
    crashes
 4. `04_altitude_and_ground.pdf`: GP feedforward (altitude offset), ground floor in the certificate, LAND backup
+6. `06_fixes_and_comparison.pdf`: five model fixes (feedback sign, Jacobian domain, row lookup, body-frame
+   velocities, 100 Hz state) and the TV-GPR / GPR × embedding-system comparison
 
 The C++ fast loop is documented on the `cpp-version` branch (`docs/_output/05_cpp_fast_loop.pdf`).
