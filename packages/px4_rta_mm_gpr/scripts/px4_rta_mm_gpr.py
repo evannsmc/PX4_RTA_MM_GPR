@@ -96,6 +96,9 @@ def main():
                         help="reference thrust cancels the GP mean disturbance (removes the steady altitude offset)")
     parser.add_argument("--min-altitude", type=float, default=0.3,
                         help="certified tubes must stay this many metres above the ground (<= 0 disables)")
+    parser.add_argument("--tube-threshold", type=float, default=0.5,
+                        help="certified tubes keep their position bounds (y, altitude) within this many metres of "
+                             "the reference position")
     parser.add_argument("--backup", choices=['land', 'none'], default='land',
                         help="what to do when no certified plan exists: PX4 LAND, or keep flying the expired plan")
     parser.add_argument("--backup-grace", type=float, default=0.02,
@@ -139,6 +142,7 @@ def main():
                              thrust_limits_mass_scaled=args.thrust_limits_mass_scaled,
                              gp_feedforward=args.gp_feedforward,
                              min_altitude=args.min_altitude,
+                             tube_threshold=args.tube_threshold,
                              backup=args.backup,
                              backup_grace=args.backup_grace,
                              ramp_speed_y=args.ramp_speed_y,

@@ -60,6 +60,7 @@ class RuntimeOptions:
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
     gp_feedforward: bool = True          # reference thrust cancels the GP mean disturbance (no altitude offset)
     min_altitude: float = 0.3            # (m) certified tubes must stay this far above the ground (<= 0: no floor)
+    tube_threshold: float = 0.5          # (m) certified tubes: position bounds (py, pz) within this of the reference
     backup: str = 'land'                 # 'land': PX4 LAND when no certified plan exists; 'none': keep flying
     backup_grace: float = 0.02           # (s) how long a plan may be expired before the backup engages
     thrust_limits_mass_scaled: bool = True # RTA thrust limits as fractions of hover thrust (hardware ratios)
@@ -484,7 +485,7 @@ class OffboardControl(Node):
 
         self.tube_timestep = 0.01  # Time step
         self.tube_horizon = self.options.tube_horizon   # Reachable tube horizon (default 30.0 s); an upper bound with early exit
-        self.collection_threshold = 0.5 # tube/reference POSITION deviation (m, py and pz) that ends the safety horizon
+        self.collection_threshold = self.options.tube_threshold # tube/reference POSITION deviation (m, py and pz) that ends the safety horizon
 
         # Everything static about the rollout, as plain values (picklable for the worker process)
         self.rollout_config = RolloutConfig(
