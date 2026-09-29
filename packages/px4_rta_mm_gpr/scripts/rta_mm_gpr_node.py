@@ -258,8 +258,9 @@ class OffboardControl(Node):
             callback_group=self.state_group)
 
 
-        # Position-uncertainty delta for the certificate: 0 in simulation (the estimate is what the sim flies), EKF2's
-        # position standard deviation (x uncertainty_sigmas) on hardware, where the estimate fuses mocap.
+        # Position-uncertainty delta for the certificate: EKF2's position standard deviation (x uncertainty_sigmas) on
+        # hardware, where the estimate fuses mocap; 0 by default in SITL, whose EKF2 fuses simulated GPS (its sigma
+        # describes GPS, not the mocap setup this certificate is meant for; see docs/04).
         mode = options.position_uncertainty
         self.delta_mode = ('0' if self.sim else 'ekf2') if mode == 'auto' else mode
         self.position_sigma: Optional[np.ndarray] = None   # (sigma_y, sigma_z) from EKF2, one assignment per message
