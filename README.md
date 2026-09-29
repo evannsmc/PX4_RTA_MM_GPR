@@ -24,9 +24,10 @@ See videos [here](https://gtvault-my.sharepoint.com/:f:/g/personal/egm9_gatech_e
 * **Control:** Newton-Raphson tracker (pitch, yaw) + RTA feedback around the certified plan (thrust, roll rate),
   100 Hz body-rate setpoints to PX4 offboard.
 * **Certification:** each rollout integrates an interval embedding of the planar dynamics with the GP wind
-  bounds, and certifies the reference until the tube's **position** bounds (y, altitude) are more than 0.5 m from
-  the reference position or the tube dips below a **ground floor** (0.3 m). Velocity and attitude bounds are not
-  limited. The next rollout starts *before* the current certificate expires. If no certified plan exists for 20 ms,
+  bounds, and certifies the reference until the tube's **position** bounds (y, altitude) are more than 0.25 m + δ from
+  the reference position or the tube dips below a **ground floor** (0.3 m). δ is the position-estimate uncertainty:
+  0 in simulation, 3σ of EKF2's position estimate on hardware (it also widens the tube's initial box). Velocity and
+  attitude bounds are not limited. The next rollout starts *before* the current certificate expires. If no certified plan exists for 20 ms,
   the node hands the vehicle to **PX4 LAND**.
 * **Wind:** EKF on the acceleration residual at 40 Hz while the node's own commands fly. The y-wind is learned
   as a function of altitude and the z-wind as a function of lateral position. The GP mean is fed forward into the

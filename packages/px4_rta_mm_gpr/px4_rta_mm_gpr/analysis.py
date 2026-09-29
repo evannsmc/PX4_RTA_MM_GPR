@@ -93,7 +93,14 @@ def valid_rows(plan: dict) -> int:
     return int(np.isfinite(plan['reachable_tube']).all(axis=1).sum())
 
 
-def tube_violation(plan: dict, threshold: float = 0.5, min_altitude: Optional[float] = None):
+def plan_threshold(plan: dict, threshold: float = 0.25) -> np.ndarray:
+    """The per-axis (y, altitude) threshold a plan was certified with: the base threshold + the plan's position
+    uncertainty delta (0 in simulation; logs from before delta existed have none)."""
+    delta = plan.get('delta')
+    return threshold + (np.zeros(2) if delta is None else np.asarray(delta, dtype=float).reshape(2))
+
+
+def tube_violation(plan: dict, threshold: float = 0.25, min_altitude: Optional[float] = None):
     """Why a plan's certificate ends: (row, reason) for the first failing row, or (None, '') if none fails.
 
     Same test as the rollout (jax_mm_rta.mm_rta._row_fails): a position bound (y or altitude) more than ``threshold``
@@ -109,11 +116,12 @@ def tube_violation(plan: dict, threshold: float = 0.5, min_altitude: Optional[fl
     if min_altitude is not None and tube[6] > -min_altitude:
         reasons.append(f'tube below the {min_altitude:g} m floor')
     dev = np.maximum(np.abs(ref - tube[:5]), np.abs(ref - tube[5:]))
-    for k in np.flatnonzero(dev[:2] > threshold):
-        reasons.append(f'tube {STATE_LABELS[k]} bound {dev[k]:.2f} m from the reference (> {threshold:g} m)')
+    thr = plan_threshold(plan, threshold)
+    for k in np.flatnonzero(dev[:2] > thr):
+        reasons.append(f'tube {STATE_LABELS[k]} bound {dev[k]:.2f} m from the reference (> {thr[k]:.3g} m)')
     if not reasons:   # logs from before the spatial-only check (threshold applied to every state)
         reasons = [f'{STATE_LABELS[k]} bound {dev[k]:.2f} from the reference (old all-state check)'
-                   for k in np.flatnonzero(dev > threshold)]
+                   for k in np.flatnonzero(dev > thr.max())]
     return v, '; '.join(reasons) or 'threshold'
 
 
@@ -276,7 +284,7 @@ class _TubeArtists:
         # margin rows (not certified), drawn only while they stay within a few thresholds (they grow very fast)
         half = 0.5 * np.maximum(tube[n_cert:n_valid, 5] - tube[n_cert:n_valid, 0],
                                 tube[n_cert:n_valid, 6] - tube[n_cert:n_valid, 1])
-        n_m = n_cert + int(np.argmax(half > 2 * thr)) if (half > 2 * thr).any() else n_valid
+        n_m = n_cert + int(np.argmax(half > 2 * thr.max())) if (half > 2 * thr.max()).any() else n_valid
         idx_m = np.arange(n_cert, n_m, 2 * stride)[::-1]
         self.margin.set_verts(_boxes(tube[idx_m]))
         self.ref.set_data(ref[:n_valid, 0], -ref[:n_valid, 1])
@@ -288,7 +296,7 @@ class _TubeArtists:
             b = _boxes(tube[v_row:v_row + 1])[0]
             self.fail.set_bounds(b[0, 0], b[0, 1], b[1, 0] - b[0, 0], b[2, 1] - b[0, 1])
             ry, ra = ref[v_row, 0], -ref[v_row, 1]
-            self.thr.set_bounds(ry - thr, ra - thr, 2 * thr, 2 * thr)
+            self.thr.set_bounds(ry - thr[0], ra - thr[1], 2 * thr[0], 2 * thr[1])   # (y, altitude) half-widths
 
 
 def _gif_frame(rgb: np.ndarray, width: int):
@@ -326,7 +334,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
     row_all = T['traj_idx'].to_numpy().astype(int)
     expired = T['plan_expired'].to_numpy().astype(bool)
     md = log.metadata
-    thr = float(md.get('collection_threshold', 0.5))
+    thr = float(md.get('collection_threshold', 0.25))
     floor = md.get('min_altitude')
     floor = float(floor) if isinstance(floor, (int, float, np.floating)) and floor > 0 else None
     goal = md.get('goal', md.get('goal_state'))
@@ -381,7 +389,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
         Patch(fc=cmap(0.3), ec=cmap(0.3), alpha=0.6, label='certified tube (interval boxes)'),
         Patch(fc='none', ec='0.45', hatch='////', label='margin after violation (not certified)'),
         Patch(fc='none', ec='tab:red', lw=1.6, label='first failing box'),
-        Patch(fc='none', ec='tab:red', ls='--', label=f'reference +- {thr:g} m at that step'),
+        Patch(fc='none', ec='tab:red', ls='--', label=f'reference +- threshold ({thr:g} m + delta) at that step'),
         Line2D([], [], color='k', lw=1.4, label='plan reference (certified part)'),
         Line2D([], [], color='tab:blue', lw=1.1, label='flown path'),
         Patch(fc='0.6', alpha=0.3, label='earlier certified tubes')],
@@ -443,7 +451,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
                 for ta in tubes:
                     ta.add_trail(_boxes(Q['p']['reachable_tube'][:Q['n_cert']:2]))
         for ta in tubes:
-            ta.update(p, row_now, n_cert, n_valid, v_row, thr, stride)
+            ta.update(p, row_now, n_cert, n_valid, v_row, plan_threshold(p, thr), stride)
         for pl in paths:
             pl.set_data(y_all[:k + 1], alt_all[:k + 1])
         for q, sc in zip(quads, (0.25, 0.25)):
@@ -452,7 +460,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
         rows = p['reachable_tube'][row_now:(v_row + 1 if v_row is not None else n_cert)]
         b = _boxes(rows).reshape(-1, 2) if len(rows) else np.array([[y_all[k], alt_all[k]]])
         c = np.array([y_all[k], alt_all[k]])
-        need = max(zoom, 1.15 * np.abs(b - c).max(), thr + 0.3)
+        need = max(zoom, 1.15 * np.abs(b - c).max(), plan_threshold(p, thr).max() + 0.3)
         cam_c = c if cam_c is None else 0.7 * cam_c + 0.3 * c
         cam_h = need if cam_h is None else max(need, 0.9 * cam_h + 0.1 * need)
         cam_h = min(cam_h, 6.0)

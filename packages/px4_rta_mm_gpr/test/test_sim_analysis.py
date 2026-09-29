@@ -69,3 +69,22 @@ def test_certificate_is_spatial():
 def test_calm_simulation_reaches_goal(tmp_path):
     res = simulate(SimConfig(duration=20.0), winds=calm())
     assert res.summary['completed'] and res.summary['final_error_to_goal'] < 0.05
+
+
+def test_position_uncertainty_widens_box_and_threshold(tmp_path):
+    """delta (per axis): the initial box is at least delta wide and the threshold is base + delta."""
+    import jax.numpy as jnp
+    from px4_rta_mm_gpr.jax_mm_rta import collection_id_jax
+    ref = jnp.zeros((2, 5))
+    tube = jnp.hstack([ref - 0.3, ref + 0.3])                       # 0.3 m in every direction
+    assert int(collection_id_jax(ref, tube, jnp.array([0.25, 0.25]))) == 0
+    assert int(collection_id_jax(ref, tube, jnp.array([0.25 + 0.06, 0.25 + 0.06]))) == -1
+    assert int(collection_id_jax(ref, tube, jnp.array([0.31, 0.25]))) == 0   # per axis: altitude still fails
+    res = simulate(SimConfig(duration=1.0, position_uncertainty=0.05), winds=calm(), log_path=str(tmp_path / 'd.h5'))
+    assert res.summary['completed']
+    with rta.load(res.log_path) as log:
+        p = log.plan(1)
+        assert np.allclose(p['delta'], 0.05)
+        half = 0.5 * (p['reachable_tube'][0, 5:7] - p['reachable_tube'][0, 0:2])
+        assert np.all(half >= 0.05 - 1e-12)                              # initial box contains the estimate error
+        assert np.allclose(rta.plan_threshold(p, 0.25), 0.30)

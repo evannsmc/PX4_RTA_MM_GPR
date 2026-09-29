@@ -96,9 +96,15 @@ def main():
                         help="reference thrust cancels the GP mean disturbance (removes the steady altitude offset)")
     parser.add_argument("--min-altitude", type=float, default=0.3,
                         help="certified tubes must stay this many metres above the ground (<= 0 disables)")
-    parser.add_argument("--tube-threshold", type=float, default=0.5,
+    parser.add_argument("--tube-threshold", type=float, default=0.25,
                         help="certified tubes keep their position bounds (y, altitude) within this many metres of "
                              "the reference position")
+    parser.add_argument("--position-uncertainty", default='auto',
+                        help="delta added to the tube threshold (and the minimum initial-box half-width) in y and z: "
+                             "'auto' (sim: 0, hardware: ekf2), 'ekf2' (EKF2 position standard deviation x "
+                             "--uncertainty-sigmas, per axis), or a fixed value in metres")
+    parser.add_argument("--uncertainty-sigmas", type=float, default=3.0,
+                        help="standard deviations of EKF2's position estimate that make up delta")
     parser.add_argument("--backup", choices=['land', 'none'], default='land',
                         help="what to do when no certified plan exists: PX4 LAND, or keep flying the expired plan")
     parser.add_argument("--backup-grace", type=float, default=0.02,
@@ -121,6 +127,10 @@ def main():
                         help="print from every callback (slow; for debugging only)")
     args, unknown = parser.parse_known_args(sys.argv[1:])
     print(f"Arguments: {args}, Unknown: {unknown}")
+    ros_args = unknown[unknown.index('--ros-args'):] if '--ros-args' in unknown else []
+    ignored = unknown[:len(unknown) - len(ros_args)]
+    if ignored:  # a typo or an option from another branch would otherwise be dropped silently
+        print(f"{BANNER}\nWARNING: ignoring unknown arguments {ignored}\n{BANNER}")
     sim = args.sim  # already a bool
     log_path = default_log_path(args.log_file)
     print(f"{sim=}, log: {log_path}")
@@ -143,6 +153,8 @@ def main():
                              gp_feedforward=args.gp_feedforward,
                              min_altitude=args.min_altitude,
                              tube_threshold=args.tube_threshold,
+                             position_uncertainty=args.position_uncertainty,
+                             uncertainty_sigmas=args.uncertainty_sigmas,
                              backup=args.backup,
                              backup_grace=args.backup_grace,
                              ramp_speed_y=args.ramp_speed_y,

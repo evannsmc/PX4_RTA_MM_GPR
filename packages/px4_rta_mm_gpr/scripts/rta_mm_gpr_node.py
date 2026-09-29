@@ -8,6 +8,7 @@ from px4_msgs.msg import(
     OffboardControlMode, VehicleCommand, #Import basic PX4 ROS2-API messages for switching to offboard mode
     TrajectorySetpoint, VehicleRatesSetpoint, # Msgs for sending setpoints to the vehicle in various offboard modes
     VehicleStatus, #Import PX4 ROS2-API messages for receiving vehicle state information
+    VehicleOdometry, # EKF2's position variance (position-uncertainty delta of the certificate)
     RcChannels
 )
 from mocap_msgs.msg import FullState
@@ -60,7 +61,9 @@ class RuntimeOptions:
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
     gp_feedforward: bool = True          # reference thrust cancels the GP mean disturbance (no altitude offset)
     min_altitude: float = 0.3            # (m) certified tubes must stay this far above the ground (<= 0: no floor)
-    tube_threshold: float = 0.5          # (m) certified tubes: position bounds (py, pz) within this of the reference
+    tube_threshold: float = 0.25         # (m) certified tubes: position bounds (py, pz) within this (+ delta) of the reference
+    position_uncertainty: str = 'auto'   # delta: 'auto' (sim 0, hardware 'ekf2'), 'ekf2', or a fixed value in metres
+    uncertainty_sigmas: float = 3.0      # delta = this many EKF2 standard deviations (per axis)
     backup: str = 'land'                 # 'land': PX4 LAND when no certified plan exists; 'none': keep flying
     backup_grace: float = 0.02           # (s) how long a plan may be expired before the backup engages
     thrust_limits_mass_scaled: bool = True # RTA thrust limits as fractions of hover thrust (hardware ratios)
@@ -255,6 +258,20 @@ class OffboardControl(Node):
             callback_group=self.state_group)
 
 
+        # Position-uncertainty delta for the certificate: 0 in simulation (the estimate is what the sim flies), EKF2's
+        # position standard deviation (x uncertainty_sigmas) on hardware, where the estimate fuses mocap.
+        mode = options.position_uncertainty
+        self.delta_mode = ('0' if self.sim else 'ekf2') if mode == 'auto' else mode
+        self.position_sigma: Optional[np.ndarray] = None   # (sigma_y, sigma_z) from EKF2, one assignment per message
+        if self.delta_mode == 'ekf2':
+            self.vehicle_odometry_subscriber = self.create_subscription(
+                VehicleOdometry, '/fmu/out/vehicle_odometry', self.ekf2_odometry_callback, qos_profile,
+                callback_group=self.state_group)
+        else:
+            float(self.delta_mode)  # a fixed value in metres (raises on a typo)
+        print(f"Certificate: position bounds within {options.tube_threshold} m + delta of the reference; "
+              f"delta = {self.delta_mode if self.delta_mode != 'ekf2' else f'{options.uncertainty_sigmas} x EKF2 sigma'}")
+
         self.in_offboard_mode: bool = False
         self.armed: bool = False
         self.in_land_mode: bool = False
@@ -349,6 +366,7 @@ class OffboardControl(Node):
             entry_ramp=options.entry_ramp,
             thrust_limits_mass_scaled=options.thrust_limits_mass_scaled,
             gp_feedforward=options.gp_feedforward, min_altitude=options.min_altitude,
+            position_uncertainty=self.delta_mode, uncertainty_sigmas=options.uncertainty_sigmas,
             backup=options.backup, backup_grace=options.backup_grace,
             ramp_speed_y=options.ramp_speed_y, ramp_speed_z=options.ramp_speed_z))
 
@@ -626,6 +644,20 @@ class OffboardControl(Node):
         self.debug(f"in odom, flat output: {[x, y, z, yaw]}")
         self.update_wind_estimate(self.state)
 
+    def ekf2_odometry_callback(self, msg) -> None:
+        """EKF2's position variance (NED): keep the standard deviations of y and z (one assignment)."""
+        var = np.asarray(msg.position_variance, dtype=float)
+        self.position_sigma = np.sqrt(np.maximum(var[1:3], 0.0))
+
+    def position_delta(self) -> np.ndarray:
+        """delta (m, py and pz) for the next rollout: the initial box is at least delta wide, the threshold + delta."""
+        if self.delta_mode != 'ekf2':
+            return np.full(2, float(self.delta_mode))
+        sigma = self.position_sigma
+        if sigma is None:   # no EKF2 variance yet: nothing can be certified (safe; it arrives long before the RTA phase)
+            return np.full(2, np.inf)
+        return self.options.uncertainty_sigmas * sigma
+
     def our_commands_fly(self, t: float) -> bool:
         """True while the vehicle is flown by this node's body-rate commands (RTA phase, offboard, plan ready)."""
         return (self.in_offboard_mode and self.begin_actuator_control <= t < self.land_time
@@ -765,7 +797,8 @@ class OffboardControl(Node):
                                      K_feedback=gains[0], K_reference=gains[1],
                                      obs_wy=self.gz_wind_obs_in_y, obs_wz=self.gy_wind_obs_in_z,
                                      warmup=warmup, submitted_at=time.time(),
-                                     goal=self.rollout_goal(current_time, s, warmup))
+                                     goal=self.rollout_goal(current_time, s, warmup),
+                                     delta=self.position_delta())
             self.rollout_backend.submit(request)
 
             result = self.rollout_backend.poll() # thread backend: already done
@@ -839,7 +872,7 @@ class OffboardControl(Node):
                                state0=req.state, K_feedback=req.K_feedback, K_reference=req.K_reference,
                                obs_wy=req.obs_wy, obs_wz=req.obs_wz,
                                violation_idx=result.violation_idx, warmup=req.warmup,
-                               goal=req.goal)
+                               goal=req.goal, delta=req.delta)
             self.collection_time = collection_time
             self.plan = plan # <- the single atomic "publish"
 

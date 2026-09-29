@@ -117,7 +117,7 @@ end to end; it just isn't needed with the new tuning.
 
 Per-tick data and backup events: `docs/data/round4/`.
 
-# Update: the certificate is spatial (0.5 m)
+# Update: the certificate is spatial (0.25 m)
 
 The test applied the threshold to **all five** states of the planar model, each in its own units:
 1 m for $p_y, p_z$, but also 1 m/s for the body-frame velocities $h, v$ and 1 rad for $\theta$.
@@ -140,7 +140,7 @@ SPATIAL = 2   # py, pz
  | (xemb_row[n + 1] > z_max))
 ```
 
-| | all states, 1.0 | spatial, 0.5 m |
+| | all states, 1.0 | spatial, 0.5 m (first version) |
 |---|---|---|
 | SITL: what ended the certificates | $h$ (velocity): 58 of 58 | $y$: 38, altitude: 7 (of 45) |
 | SITL: certified horizon, median / min | 0.42 / 0.17 s | **0.53 / 0.27 s** |
@@ -156,6 +156,62 @@ within about 0.1 s (interval bounds grow roughly exponentially). The tubes now u
 allowed: the lowest certified tube is closer to the floor, and the floor test still holds it off.
 `test/test_sim_analysis.py::test_certificate_is_spatial` checks that a huge velocity/attitude spread
 alone does not fail a row, and that a 0.6 m position bound or the floor does.
+
+## The threshold: 0.25 m (default)
+
+`--tube-threshold` sets the half-width; the default is now **0.25 m**, so every certified box lies
+inside a 0.5 m square centred on the reference position. Halving it costs little, because the tube's
+width grows roughly exponentially along the plan: each halving of the allowed width moves the end of
+certification only about one doubling time earlier.
+
+Numerical closed loop, 10 runs per threshold (calm, and paper winds ×0.3 / ×0.6 / ×1.0 with 3 seeds):
+
+| threshold | completed | certified horizon, median / min | replans | lowest certified tube | plans ended by the floor |
+|---|---|---|---|---|---|
+| 0.15 m | 10/10 | 0.48 / 0.33 s | 44.5 | 0.55 m | 0 |
+| **0.25 m** | 10/10 | 0.52 / 0.37 s | 39.7 | 0.45 m | 0 |
+| 0.35 m | 10/10 | 0.57 / 0.40 s | 36.9 | 0.35 m | 0 |
+| 0.5 m | 10/10 | 0.60 / 0.42 s | 35.1 | 0.31 m | 6 |
+
+SITL (Python loop 3 flights each, C++ loop 1 flight each): no uncertified time and no backups at either
+threshold; 0.25 m certifies 0.51 s ahead (median; minimum 0.28–0.39 s) against 0.54 s at 0.5 m, with
+44–45 instead of 39 plans in the 20 s RTA phase. A new plan arrives about 10 ms after it is requested,
+so the shortest horizon still leaves about 28× margin. Tracking is unchanged, and the lowest certified
+tube stays higher (0.69–0.83 m against 0.54–0.63 m).
+
+## Position uncertainty δ
+
+The tube is computed from the *estimated* state; the vehicle can be up to the estimation error away
+from it. Each rollout therefore takes a position uncertainty $\delta = (\delta_y, \delta_z)$ and
+
+* widens the initial box in $p_y, p_z$ to at least $\delta$ (so the tube contains the true position), and
+* certifies against $0.25\,\text{m} + \delta$ per axis (so the tube keeps 0.25 m of room to grow).
+
+`--position-uncertainty` chooses $\delta$: `auto` (default: 0 in simulation, where the estimate is the
+state the simulator flies, and `ekf2` on hardware), `ekf2`, or a fixed value in metres. With `ekf2`,
+the node subscribes to `/fmu/out/vehicle_odometry` and uses $\delta = n\sigma$ per axis from EKF2's
+`position_variance` ($n$ = `--uncertainty-sigmas`, default 3, as for the GP bounds). The threshold is a
+traced input of the compiled rollout, so $\delta$ can change every plan without recompiling; each plan
+stores the $\delta$ it used.
+
+EKF2's variance comes from its configured noise parameters (for motion capture, `EKF2_EVP_NOISE`), not
+from a measurement of the error: set them to the motion-capture system's real accuracy, or $\delta$ will
+be too large (or too small).
+
+**Stress test.** With `--position-uncertainty ekf2` in SITL, EKF2 fuses simulated GPS:
+$\delta \approx 0.32$ m in $y$ and 0.50 m in $z$. The flight had no uncertified time, but:
+
+| | $\delta = 0$ (default in sim) | $\delta$ from EKF2 (GPS-level) |
+|---|---|---|
+| certified horizon, median / min | 0.51 / 0.28 s | 0.10 / 0.07 s |
+| plans in the 20 s RTA phase | 44 | 244 |
+| plans ended by the floor | 0 | 132 |
+| lowest certified tube | 0.81 m | 0.32 m |
+
+A wide initial box costs more than the $\delta$ it adds to the threshold: mixed-monotone bounds grow
+faster from a wider box. In altitude, $\delta$ also competes with the floor (hovering at 1 m with a
+±0.5 m box leaves 0.2 m above the 0.3 m floor). With motion-capture accuracy (millimetres) neither
+effect is noticeable; with a badly tuned EKF2 they show up as many more replans and a short horizon.
 
 # Remaining caveats
 

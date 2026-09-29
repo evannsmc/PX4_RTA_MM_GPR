@@ -34,6 +34,7 @@ class RolloutPlan:
     violation_idx: int = -1       # first row where the tube left the threshold (-1: none)
     warmup: bool = False
     goal: np.ndarray = None       # goal state the rollout's reference was steered to
+    delta: np.ndarray = None      # (m) position uncertainty (py, pz) the rollout used: box >= delta, threshold + delta
 
     def index_at(self, t: float) -> int:
         """Time-indexed lookup: the reference row that corresponds to time ``t``.

@@ -85,7 +85,7 @@ symlinks to the sources: edits take effect without rebuilding.
 
 1. **`main()`** (`scripts/px4_rta_mm_gpr.py`) parses the options into a frozen `RuntimeOptions`
    dataclass and computes the log path, `<workspace>/src/data_analysis/log_files/px4_rta_mm_gpr/`.
-2. **`rclpy.init()`**, then **`OffboardControl(sim, options)`** (`scripts/rta_mm_gpr_node.py:186`). The
+2. **`rclpy.init()`**, then **`OffboardControl(sim, options)`** (`scripts/rta_mm_gpr_node.py:190`). The
    constructor does all the slow work *before* anything flies:
    a. vehicle constants (`utilities/sim_utilities.py` or `hardware_utilities.py`), wind EKF,
       callback groups, publishers and subscriptions;
@@ -127,7 +127,7 @@ symlinks to the sources: edits take effect without rebuilding.
 
 ## One control tick (100 Hz, control group)
 
-`control_algorithm_callback` → `control_administrator` (`scripts/rta_mm_gpr_node.py:955`):
+`control_algorithm_callback` → `control_administrator` (`scripts/rta_mm_gpr_node.py:989`):
 
 1. read `s = self.state` and `plan = self.plan` **once** (they may be replaced at any moment);
 2. if `t > plan.collection_time` the plan is no longer certified: count it, and after 20 ms
@@ -140,9 +140,9 @@ symlinks to the sources: edits take effect without rebuilding.
 
 ## One plan (rollout group, and the worker process)
 
-`rollout_callback` (`:732`) runs every 10 ms but only starts a rollout when it is due:
+`rollout_callback` (`:765`) runs every 10 ms but only starts a rollout when it is due:
 
-1. `poll()` the backend; a finished result is **installed** (`install_plan`, `:809`): it becomes an
+1. `poll()` the backend; a finished result is **installed** (`install_plan`, `:843`): it becomes an
    immutable `RolloutPlan`, is published with one assignment `self.plan = plan`, and stored in the log;
 2. a rollout is due when `t >= collection_time - lead`, where `collection_time` is when the current
    plan stops being certified and `lead` is about twice the recent worst rollout latency
@@ -154,7 +154,9 @@ symlinks to the sources: edits take effect without rebuilding.
    bounds (mean ± 3σ plus a Lipschitz buffer). It stops at the **first row that fails the certificate**
    plus a 1 s margin (early exit);
 5. the certificate is **spatial**: a row fails when the tube's position bounds ($p_y$ or $p_z$) are more
-   than 0.5 m from the reference position, or the tube reaches the 0.3 m floor (doc 04).
+   than 0.25 m + δ from the reference position, or the tube reaches the 0.3 m floor. δ is the
+   position-estimate uncertainty carried by the request (0 in sim, 3σ of EKF2 on hardware); it also widens
+   the initial box (doc 04).
 
 ## Wind and gains (state and estimation groups)
 
@@ -212,7 +214,7 @@ compiled = jax.jit(control_step).lower(f64(9), f64(5), f64(4), ...).compile()
 | `control_step` | `control_kernels.py:54` | states, last input, NR reference, plan row, gains → 4 commands | control thread, 100 Hz |
 | `wind_model` | `control_kernels.py:61` | NR state, input → model accelerations | state thread, ~40 Hz |
 | `linearize` | `control_kernels.py:65` | planar state, input → $A, B$ (`jax.jacfwd`) | estimation thread |
-| rollout | `rollout_backends.py:128` | $t_0$, state, $x_\text{pert}$, gains, 2 GP buffers, goal → tube, reference, feedforward, violation row, rows used | rollout thread or worker process |
+| rollout | `rollout_backends.py:131` | $t_0$, state, $x_\text{pert}$, gains, 2 GP buffers, goal, threshold (y, z) → tube, reference, feedforward, violation row, rows used | rollout thread or worker process |
 
 `control_step` **fuses** what used to be about six separate dispatches per tick (NR tracker, slicing,
 `u_applied`, concatenation, clipping) into one executable: one call from Python per tick.
@@ -223,7 +225,7 @@ time step, the planar system, its mixed Jacobian, input limits, threshold, floor
 arrays in the table are traced inputs.
 
 **Fixed shapes with early exit.** XLA programs have fixed shapes. The early-exit rollout
-(`jax_mm_rta/mm_rta.py:299`) uses `lax.while_loop` over preallocated full-horizon arrays filled with NaN
+(`jax_mm_rta/mm_rta.py:307`) uses `lax.while_loop` over preallocated full-horizon arrays filled with NaN
 and returns `n_valid`, the number of rows it actually computed; the engine trims the result in NumPy.
 The loop stops at the first failing row plus the margin (3–7 ms instead of 60–190 ms for the full 30 s),
 and the rows it computes are identical to the full rollout's (it only depends on earlier rows).
@@ -277,7 +279,7 @@ groups may run in parallel on a multithreaded executor. Five groups, so five thr
 | group | callbacks (period) | writes |
 |-------|--------|---------|
 | `px4_io_group` | heartbeat (0.1 s), `vehicle_status`, RC channels | offboard / armed / RC flags; PX4 mode and arm commands |
-| `state_group` | odometry (~40 Hz) + wind EKF | `self.state`, `self.wy`, `self.wz`, recorder `wind` |
+| `state_group` | odometry (~40 Hz) + wind EKF; EKF2 odometry (hardware) | `self.state`, `self.wy`, `self.wz`, `self.position_sigma`, recorder `wind` |
 | `control_group` | control law (0.01 s) | `self.last_input`, recorder `ticks`, setpoints to PX4 |
 | `rollout_group` | rollout check (0.01 s) | `self.plan`, `self.collection_time`, recorder plans |
 | `estimation_group` | GP buffers (0.1 s), LQR check (0.05 s) | GP buffers, `self.gains`, recorder `gains` |
@@ -354,6 +356,7 @@ a plan whose tube and reference were assigned separately.
 | `self.gains` (`(K_fb, K_ref)`) | estimation | control, rollout | tuple, one assignment (both gains always from the same linearisation) |
 | GP buffers `obs_wy`, `obs_wz` | estimation | rollout (into the request) | copy-on-write: copy, modify the copy, assign |
 | `self.wy`, `self.wz` | state | estimation, control (logged) | floats, one assignment each |
+| `self.position_sigma` (EKF2 σ, y and z) | state | rollout (into the request's δ) | a new array, one assignment |
 | `self.last_input` | control | state (wind model) | a new array each tick, one assignment |
 | offboard / armed / RC flags | px4_io | control, heartbeat | bools |
 | warm-up request | estimation | rollout | `threading.Event` |
@@ -363,7 +366,7 @@ a plan whose tube and reference were assigned separately.
 
 ## The locks there are, and why
 
-* **`plan_lock`** (`threading.Lock`, `rta_mm_gpr_node.py:306`): held while a plan is installed, so the
+* **`plan_lock`** (`threading.Lock`, `rta_mm_gpr_node.py:324`): held while a plan is installed, so the
   plan number, `collection_time` and the new plan are updated together. The control thread never takes
   it; it reads `self.plan` once (the plan itself carries its own `collection_time`).
 * **`Recorder._lock`** (flight_recorder): guards the lists of records and events and the stream registry.
@@ -441,7 +444,7 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
 | `MutuallyExclusiveCallbackGroup` (`rclpy.callback_groups`) | callback groups | the five groups above |
 | `QoSProfile`, `ReliabilityPolicy`, `HistoryPolicy`, `DurabilityPolicy` (`rclpy.qos`) | quality of service | PX4's topics need best-effort, transient-local, depth 1 |
 | `SingleThreadedExecutor`, `MultiThreadedExecutor` (`rclpy.executors`); `EventsExecutor` (`rclpy.experimental`) | executors | `--executor` |
-| `px4_msgs.msg` | PX4's uORB messages as ROS 2 types | `OffboardControlMode`, `VehicleCommand`, `TrajectorySetpoint`, `VehicleRatesSetpoint` (out); `VehicleStatus`, `RcChannels` (in) |
+| `px4_msgs.msg` | PX4's uORB messages as ROS 2 types | `OffboardControlMode`, `VehicleCommand`, `TrajectorySetpoint`, `VehicleRatesSetpoint` (out); `VehicleStatus`, `RcChannels`, `VehicleOdometry` (EKF2 position variance) (in) |
 | `FullState` (`mocap_msgs.msg`) | message of the relay | position, velocity, acceleration, attitude in one sample |
 | `launch`, `Node` (`launch_ros.actions`) | ROS 2 launch system | the launch files |
 | `setuptools` | Python packaging | `setup.py` (`find_packages`, entry points, data files) |
@@ -507,7 +510,7 @@ callback group
 : a set of callbacks that an executor never runs concurrently (mutually exclusive).
 
 certificate / certified horizon
-: the time span over which the reachable tube stays within 0.5 m of the reference position and above the
+: the time span over which the reachable tube stays within 0.25 m of the reference position and above the
   floor; the plan may be flown only within it.
 
 copy-on-write

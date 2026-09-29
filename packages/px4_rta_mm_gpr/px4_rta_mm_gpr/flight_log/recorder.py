@@ -45,7 +45,7 @@ GAIN_COLUMNS = ('time', 'first_lqr') + tuple(f'K_feedback_{i}{j}' for i in range
     + tuple(f'K_reference_{i}{j}' for i in range(2) for j in range(5))
 
 PLAN_ARRAYS = ('reachable_tube', 'rollout_ref', 'feedfwd_input', 'state0', 'K_feedback', 'K_reference',
-               'obs_wy', 'obs_wz', 'goal')
+               'obs_wy', 'obs_wz', 'goal', 'delta')
 PLAN_ATTRS = ('seq', 't_start', 'dt', 'collection_time', 'violation_idx', 'compute_time', 'latency', 'warmup')
 
 

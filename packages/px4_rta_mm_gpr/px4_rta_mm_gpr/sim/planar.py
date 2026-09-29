@@ -54,7 +54,8 @@ class SimConfig:
     tube_horizon: float = 30.0
     early_exit: bool = True
     tube_margin: float = 1.0               # (s)
-    collection_threshold: float = 0.5   # m: tube position bounds vs reference position (py, pz)
+    collection_threshold: float = 0.25  # m: tube position bounds vs reference position (py, pz)
+    position_uncertainty: float = 0.0   # (m) delta: position-estimate uncertainty (exact state in simulation)
     x_pert: float = 5e-4
     min_altitude: Optional[float] = 0.3    # (m) ground floor in the certificate (None: no floor)
     gp_feedforward: bool = True
@@ -172,7 +173,8 @@ def simulate(config: SimConfig = SimConfig(), winds: Optional[Tuple[Callable, Ca
             if cfg.observe_period is None:
                 observe(t, wy, wz)            # original studies: one observation per replan
             res = engine.compute(RolloutRequest(t_start=t, state=x, K_feedback=K_fb, K_reference=K_ref,
-                                                obs_wy=obs_wy, obs_wz=obs_wz, goal=np.asarray(cfg.goal)))
+                                                obs_wy=obs_wy, obs_wz=obs_wz, goal=np.asarray(cfg.goal),
+                                                delta=np.full(2, cfg.position_uncertainty)))
             compute_times.append(res.compute_time)
             collection_time = t + res.violation_idx * cfg.dt
             plan_seq += 1
@@ -181,7 +183,8 @@ def simulate(config: SimConfig = SimConfig(), winds: Optional[Tuple[Callable, Ca
                                compute_time=res.compute_time, latency=res.compute_time,
                                save_tube=np.zeros((0, 4)), tube_start=0, seq=plan_seq, state0=x.copy(),
                                K_feedback=K_fb, K_reference=K_ref, obs_wy=obs_wy, obs_wz=obs_wz,
-                               violation_idx=res.violation_idx, warmup=False, goal=np.asarray(cfg.goal))
+                               violation_idx=res.violation_idx, warmup=False, goal=np.asarray(cfg.goal),
+                               delta=np.full(2, cfg.position_uncertainty))
             rec.add_plan(plan)
 
         # ---- certification watchdog (the node commands LAND here) ----

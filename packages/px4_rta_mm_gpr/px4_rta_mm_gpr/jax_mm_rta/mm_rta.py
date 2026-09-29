@@ -122,13 +122,14 @@ def u_applied(x, xref, uref, K_feedback, ulim):
  
 ## JIT: Collection idx function
 # The certificate is SPATIAL: a row fails when the tube's position bounds (py, pz) are more than `threshold` (m) from
-# the reference position, or the tube reaches the floor. Velocity and attitude bounds are not limited (a NaN in any
+# the reference position, or the tube reaches the floor. `threshold` is a scalar or a per-axis pair (py, pz): the node
+# uses 0.25 m + delta, delta = the position-estimate uncertainty (0 in simulation). Velocity and attitude bounds are not limited (a NaN in any
 # state still fails: the rollout broke down).
 SPATIAL = 2   # the first two states, py and pz
 
 
 @jit
-def collection_id_jax(xref, xemb, threshold=0.5, z_max=jnp.inf):
+def collection_id_jax(xref, xemb, threshold=0.25, z_max=jnp.inf):
     n = xref.shape[1]
     diff1 = jnp.abs(xref[:, :SPATIAL] - xemb[:, :SPATIAL]) > threshold
     diff2 = jnp.abs(xref[:, :SPATIAL] - xemb[:, n:n + SPATIAL]) > threshold
@@ -303,8 +304,8 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
     return embedded_states_full, reference_states_full, control_inputs_full
 
 
-def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, x_des, *, n_steps, dt, perm,
-                            sys_mjacM, MASS, ulim, quad_sys, threshold, margin_steps, z_max=jnp.inf,
+def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, x_des, threshold, *, n_steps, dt,
+                            perm, sys_mjacM, MASS, ulim, quad_sys, margin_steps, z_max=jnp.inf,
                             gp_feedforward=False):
     """Early-exit rollout: integrate only until the tube first leaves the certification threshold, plus a margin.
 
