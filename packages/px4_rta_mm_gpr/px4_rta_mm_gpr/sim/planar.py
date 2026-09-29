@@ -60,7 +60,7 @@ class SimConfig:
     min_altitude: Optional[float] = 0.3    # (m) ground floor in the certificate (None: no floor)
     gp_feedforward: bool = True
     gp_epsilon: float = 0.25               # TVGPR forgetting rate; 0 = time-invariant GP
-    embedding: str = 'uw'                  # 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
+    embedding: str = 'u'                   # 'u' (66)-(67) (default), 'uw' (68)-(69), 'none' (64)-(65)
     gp_learn: bool = True
     observe_period: Optional[float] = 0.1  # (s) wind observations for the GP; None: only at replans (original studies)
     obs_noise_std: float = 0.0             # (N) noise added to each wind observation

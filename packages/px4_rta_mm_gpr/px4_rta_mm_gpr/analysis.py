@@ -91,13 +91,16 @@ def tube_escapes(log: FlightLog) -> pd.DataFrame:
 
 
 VARIANTS = {   # the paper comparison, GP x embedding system: name -> (GP forgetting epsilon, embedding)
-    'A: TV-GPR + (68)-(69)': (0.25, 'uw'),   # this package's default
-    'E: TV-GPR + (66)-(67)': (0.25, 'u'),
+    'A: TV-GPR + (68)-(69)': (0.25, 'uw'),   # the paper's formulation
+    'E: TV-GPR + (66)-(67)': (0.25, 'u'),    # this package's default (baseline)
     'F: TV-GPR + (64)-(65)': (0.25, 'none'),
     'D: GPR + (68)-(69)': (0.0, 'uw'),
     'C: GPR + (66)-(67)': (0.0, 'u'),
     'B: GPR + (64)-(65)': (0.0, 'none'),
 }
+
+
+BASELINE = 'E: TV-GPR + (66)-(67)'   # default configuration (with the 5 cm model-mismatch margin in SITL / hardware)
 
 
 def comparison_metrics(log: FlightLog, name: Optional[str] = None) -> dict:

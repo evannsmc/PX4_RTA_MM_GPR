@@ -60,7 +60,8 @@ class RuntimeOptions:
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
     gp_feedforward: bool = True          # reference thrust cancels the GP mean disturbance (no altitude offset)
     gp: str = 'tv'                       # 'tv': time-varying GP (epsilon 0.25); 'static': time-invariant GP (epsilon 0)
-    embedding: str = 'uw'                # embedding system: 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
+    embedding: str = 'u'                 # embedding system: 'u' (66)-(67) (default: as safe as (68)-(69) with TV-GPR and
+                                         # ~1/3 cheaper; see the README comparison), 'uw' (68)-(69), 'none' (64)-(65)
     min_altitude: float = 0.3            # (m) certified tubes must stay this far above the ground (<= 0: no floor)
     tube_threshold: float = 0.25         # (m) certified tubes: position bounds (py, pz) within this (+ delta) of the reference
     position_uncertainty: str = 'auto'   # delta: 'auto' (sim 0, hardware 'ekf2'), 'ekf2', or a fixed value in metres

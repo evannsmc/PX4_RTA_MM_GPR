@@ -50,7 +50,7 @@ class RolloutConfig:
     min_altitude: Optional[float] = None  # (m) the whole tube must stay this far above the ground (None: no floor)
     gp_feedforward: bool = False  # reference thrust cancels the GP mean disturbance
     gp_epsilon: float = 0.25      # TVGPR forgetting rate; 0 = time-invariant GP
-    embedding: str = 'uw'         # embedding system (paper Appendix A): 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
+    embedding: str = 'u'          # embedding system (paper Appendix A): 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
 
 
 @dataclass(frozen=True)

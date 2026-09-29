@@ -110,9 +110,9 @@ def main():
                         help="standard deviations of EKF2's position estimate that make up delta")
     parser.add_argument("--gp", choices=['tv', 'static'], default='tv',
                         help="wind model: tv = time-varying GP (forgetting 0.25), static = time-invariant GP")
-    parser.add_argument("--embedding", choices=['uw', 'u', 'none'], default='uw',
-                        help="embedding system (paper Appendix A): uw = first order in u and w (68)-(69); "
-                             "u = first order in u only (66)-(67); none = no first-order terms (64)-(65)")
+    parser.add_argument("--embedding", choices=['uw', 'u', 'none'], default='u',
+                        help="embedding system (paper Appendix A): u = first order in u (66)-(67) (default); "
+                             "uw = first order in u and w (68)-(69); none = no first-order terms (64)-(65)")
     parser.add_argument("--backup", choices=['land', 'none'], default='land',
                         help="what to do when no certified plan exists: PX4 LAND, or keep flying the expired plan")
     parser.add_argument("--backup-grace", type=float, default=0.02,

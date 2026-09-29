@@ -157,7 +157,7 @@ EMBEDDINGS = ('uw', 'u', 'none')   # paper Appendix A: (68)-(69), (66)-(67), (64
 
 
 def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des, div=50,
-               gp_feedforward=False, gp_epsilon=0.25, embedding='uw'):
+               gp_feedforward=False, gp_epsilon=0.25, embedding='u'):
     """Build the one-step update of the (embedding system, reference) pair.
 
     Shared by the full-horizon scan (jitted_rollout) and the early-exit loop
@@ -329,7 +329,7 @@ def _row_fails(xref_row, xemb_row, threshold, z_max=jnp.inf):
 @partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys', 'gp_feedforward',
                                    'gp_epsilon', 'embedding'])
 def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.]), gp_feedforward=False,
-                   gp_epsilon=0.25, embedding='uw'):
+                   gp_epsilon=0.25, embedding='u'):
     step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des,
                       gp_feedforward=gp_feedforward, gp_epsilon=gp_epsilon, embedding=embedding)
     tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
@@ -345,7 +345,7 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
 
 def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, x_des, threshold, *, n_steps, dt,
                             perm, sys_mjacM, MASS, ulim, quad_sys, margin_steps, z_max=jnp.inf,
-                            gp_feedforward=False, gp_epsilon=0.25, embedding='uw'):
+                            gp_feedforward=False, gp_epsilon=0.25, embedding='u'):
     """Early-exit rollout: integrate only until the tube first leaves the certification threshold, plus a margin.
 
     The scan is causal, so every computed row is IDENTICAL to the corresponding row of jitted_rollout and the

@@ -14,7 +14,9 @@ date: 2026-09-29
   inside its certified tube with every embedding system (0 % of the time outside); a time-invariant GP is
   violated about 40 % of the time, by up to 0.29 m. The SITL world has no wind, so SITL cannot show this.
 * With the time-varying GP the three embedding systems certify the same horizon with the same tubes;
-  (66)-(67) is the cheapest (about a third less compute per rollout).
+  (66)-(67) is the cheapest (about a third less compute per rollout), so **TV-GPR + (66)-(67) is the
+  default (the baseline)**. Rolled out from identical inputs the tubes are not nested as the construction
+  suggests ((68) ⊆ (66) ⊆ (64)); see "Are the tubes nested?" below.
 * In SITL a **5 cm model-mismatch margin** on $\delta$ (now the default) takes the time the vehicle spends
   outside its certified tube from 19 % to 0 % (all six variants: 0-0.02 %), at the price of a shorter
   certified horizon (0.34 s).
@@ -77,8 +79,8 @@ Numerical, drifting wind (9 wind runs per variant): time outside the certified t
 
 | embedding system | **TV-GPR** | GPR |
 |---|---|---|
-| (68)-(69): first order in $u$ and $w$ | **A: 0 %, 0.9 mm** (default) | D: 41 %, 0.10 m |
-| (66)-(67): first order in $u$ | **E: 0 %, 0.9 mm** | C: 40 %, 0.29 m |
+| (68)-(69): first order in $u$ and $w$ | **A: 0 %, 0.9 mm** (the paper's) | D: 41 %, 0.10 m |
+| (66)-(67): first order in $u$ | **E: 0 %, 0.9 mm** (baseline) | C: 40 %, 0.29 m |
 | (64)-(65): no first-order terms | **F: 0.03 %, 1.2 mm** | B: 40 %, 0.28 m |
 
 | | A | E | F | D | C | B |
@@ -97,6 +99,21 @@ observations, so its tubes are about 10× thinner and certify further ahead; but
 time, so the GP is confidently wrong and the vehicle leaves the "certified" tube about 40 % of the time,
 by up to 0.29 m. The TV-GPR's forgetting grows the uncertainty over the look-ahead, which keeps the tube
 honest: no escapes with any embedding system.
+
+**Are the tubes nested?** Every plan of the ×0.6 wind run rolled out again with the three TV-GPR
+embeddings from its recorded inputs (34 plans):
+
+| | A (68)-(69) | E (66)-(67), baseline | F (64)-(65) |
+|------|-----|-----|-----|
+| certified horizon $t_r$, mean | 0.597 s | 0.598 s | 0.599 s |
+| position half-width at +0.25 s / +0.40 s | 24.4 / 82.5 mm | 24.4 / 82.5 mm | 24.1 / 80.8 mm |
+| nested inside the next (all states, certified rows) | A ⊆ E in 0 / 34 | E ⊆ F in 30 / 34 | |
+
+(On 71 plans of two wind runs: $t_r(A) - t_r(E) \in [-10, 0]$ ms, $t_r(E) - t_r(F) \in [-20, 0]$ ms.)
+(66)-(67) bounds the GP mean by its exact range over the box; (68)-(69) replaces it by the mean-value form
+$[M_w][M^\mu_x](x - x_r)$, which on its own contains that range and only wins when folding it into the
+state matrix cancels part of $[M_x] + [M_u]K$ (a disturbance whose state dependence counteracts the
+dynamics, as in the paper's example $g(x) = -x$).
 
 **Why the embedding barely matters.** With TV-GPR the growth of $\sigma$ along the look-ahead dominates
 the tube's growth, so the first-order disturbance term of (68)-(69) buys no measurable tightening over

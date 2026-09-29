@@ -394,8 +394,10 @@ and the log; if they ever had to be consistent, they would become one tuple, lik
   forgetting factor $(1-\epsilon)^{|t-t'|/2}$ in time, 9 observations per GP. `GPR.py` is the
   time-invariant variant, kept as part of the package API.
 * **Rollout step** (`_make_step`): the reference moves under the reference LQR (plus the GP mean
-  feedforward on thrust); the tube moves under the **embedding system** built from immrax's mixed
-  Jacobians (`irx.mjacM`) of the dynamics and of the GP mean, with the wind interval from the GP.
+  feedforward on thrust); the tube moves under one of the paper's **embedding systems** (Appendix A),
+  built from immrax's mixed Jacobians (`irx.mjacM`) of the dynamics: (66)-(67) by default (first order in
+  the feedback, the GP disturbance bounded over the box), or (68)-(69) / (64)-(65) with `--embedding`.
+  With TV-GPR they are equally safe and certify the same horizon; (66)-(67) is the cheapest (doc 06).
 * **NR tracker** (`jax_nr/`): predicts the output 0.8 s ahead (forward Euler in a `lax.fori_loop`), inverts
   the Jacobian of that prediction with respect to the input, and adds an integral control-barrier term that
   keeps the rates within ±0.8 rad/s. It flies pitch and yaw; the RTA feedback flies thrust and roll.

@@ -11,7 +11,27 @@ doi: 10.1109/ICRA57147.2024.10611237.
 
 See videos [here](https://gtvault-my.sharepoint.com/:f:/g/personal/egm9_gatech_edu/IgCTC42sLm-LSrAf6xMkPS_UAev1dNpcvioJ8PtQfRRZTEs?e=mRaYgF).
 
-## Key result: the time-varying GP is what keeps the certificate true
+## Baseline and main result
+
+**Baseline (the default):** time-varying GP (**TV-GPR**) + the paper's embedding system **(66)-(67)**, a
+0.25 m spatial certificate, and a 5 cm model-mismatch margin on the tube's starting box. In PX4 SITL:
+the vehicle never left its certified tube (0 % of the time), no LAND backup was needed, certified
+0.34 s ahead, tracking 13 / 16 mm, one rollout in about 4 ms.
+
+**Main takeaways**
+
+1. **TV-GPR over GPR.** When the wind drifts over time (numerical simulation with the paper's evolving
+   wind; the SITL world has none), a time-invariant GP is confidently wrong: the
+   vehicle leaves its "certified" tube about **40 %** of the time, by up to 0.29 m (more than the 0.25 m
+   threshold). With TV-GPR it **never** does (worst 1 mm), whatever the embedding system.
+2. **The embedding systems are equivalent here.** With TV-GPR, (68)-(69), (66)-(67) and (64)-(65) certify
+   the same horizon (within 20 ms of 0.6 s) with the same tubes (within 2.5 %); (66)-(67) is the cheapest,
+   so it is the default. The paper's expected nesting (68) ⊆ (66) ⊆ (64) does not show up for this vehicle
+   (constant input matrix, GP uncertainty dominating the tube's growth); see the comparison below.
+3. **A 5 cm model-mismatch margin makes SITL match the model.** Without it the real PX4 vehicle leaves the
+   tube in the first moments of each plan (about 20 % of the time); with it, 0 %.
+
+## The comparison: TV-GPR vs GPR × three embedding systems
 
 The certified tube is only as good as its disturbance model. We computed the tube six ways, the
 **time-varying GP (TV-GPR)** of this package and a **time-invariant GP (GPR)**, each with the paper's three
@@ -24,8 +44,8 @@ embedding systems (Appendix A), all at the same certificate (position within 0.2
 
 | embedding system | **TV-GPR** (this package) | GPR |
 |---|---|---|
-| (68)-(69): first order in *u* and *w* | **A: 0 %** outside, worst 0.9 mm (default) | D: 41 %, worst 0.10 m |
-| (66)-(67): first order in *u* | **E: 0 %**, worst 0.9 mm | C: 40 %, worst 0.29 m |
+| (68)-(69): first order in *u* and *w* | **A: 0 %** outside, worst 0.9 mm (the paper's) | D: 41 %, worst 0.10 m |
+| (66)-(67): first order in *u* | **E: 0 %**, worst 0.9 mm (**baseline**) | C: 40 %, worst 0.29 m |
 | (64)-(65): no first-order terms | **F: 0.03 %**, worst 1.2 mm | B: 40 %, worst 0.28 m |
 
 **PX4 SITL** (3 flights per variant; the Gazebo world has **no wind**, so the GPs only learn a steady
@@ -33,7 +53,7 @@ thrust offset, and SITL tests the model's mismatch with the real vehicle, not th
 
 | | A | E | F | D | C | B |
 |---|---|---|---|---|---|---|
-| wind model + embedding | TV + (68) | TV + (66) | TV + (64) | GPR + (68) | GPR + (66) | GPR + (64) |
+| wind model + embedding | TV + (68) | **TV + (66), baseline** | TV + (64) | GPR + (68) | GPR + (66) | GPR + (64) |
 | outside the tube, δ = 0 | 19 % | 20 % | 20 % | 65 % | 67 % | 71 % |
 | **outside the tube, 5 cm margin (default)** | **0 %** | **0 %** | **0 %** | **0 %** | **0 %** | **0.02 %** |
 | certified horizon, 5 cm margin | **0.34 s** | **0.34 s** | **0.34 s** | 0.17 s | 0.29 s | 0.29 s |
@@ -45,9 +65,12 @@ thrust offset, and SITL tests the model's mismatch with the real vehicle, not th
   numerical runs the true state is outside its "certified" tube about 40 % of the time, by up to 0.29 m,
   more than the 0.25 m threshold itself. **With the time-varying GP the certificate holds**, with every
   embedding system (worst 0.9-1.2 mm, from the 10 ms integration step).
-* **The embedding system barely matters once the GP is right.** With TV-GPR, (68)-(69), (66)-(67) and
-  (64)-(65) certify the same horizon with the same tube widths: the GP's growing uncertainty over the
-  look-ahead dominates the tube's growth, and for this vehicle (64)-(65) coincides with (66)-(67).
+* **The embedding system barely matters once the GP is right.** Rolled out from identical inputs, the
+  three TV-GPR tubes certify within 20 ms of each other (A 0.597 s, E 0.598 s, F 0.599 s) and differ by
+  under 2.5 % in width. The expected nesting (68) ⊆ (66) ⊆ (64) does not hold here: (66)-(67) bounds the GP
+  mean by its exact range over the box, which on its own is tighter than the mean-value form of (68)-(69),
+  and the GP's growing uncertainty dominates both; and the input matrix is a constant selector, so
+  (64)-(65) equals (66)-(67) and gains a little from clipping to the actuator limits.
 * **In SITL the planar model is the limit, and a 5 cm margin fixes it.** With δ = 0 every variant leaves
   its tube in the first moments of each plan (the thinner GPR tubes more often); with the default 5 cm
   model-mismatch margin all six stay inside, and the TV-GPR variants certify the longest (the GPR variants
@@ -78,7 +101,7 @@ Reproduce: `--gp tv|static --embedding uw|u|none --model-mismatch-margin 0.05` (
 * **Control:** Newton-Raphson tracker (pitch, yaw) + RTA feedback around the certified plan (thrust, roll rate),
   100 Hz body-rate setpoints to PX4 offboard.
 * **Certification:** each rollout integrates an interval embedding of the planar dynamics with the GP wind
-  bounds, and certifies the reference until the tube's **position** bounds (y, altitude) are more than 0.25 m + δ from
+  bounds (the paper's embedding system (66)-(67) by default; `--embedding uw|u|none`), and certifies the reference until the tube's **position** bounds (y, altitude) are more than 0.25 m + δ from
   the reference position or the tube dips below a **ground floor** (0.3 m). δ = max(model-mismatch margin 0.05 m,
   position-estimate uncertainty: 0 in SITL, 3σ of EKF2 on hardware); it also widens the tube's initial box. Velocity and
   attitude bounds are not limited. The next rollout starts *before* the current certificate expires. If no certified plan exists for 20 ms,
