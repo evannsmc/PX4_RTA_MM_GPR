@@ -110,7 +110,7 @@ Reproduce: `--gp tv|static --embedding uw|u|none --model-mismatch-margin 0.05` (
   of every `ControlTick` into the same flight log.
 
 ```bash
-ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py      # relay + rta_fast_loop + planner
+ros2 launch px4_rta_mm_gpr cpp_rta_launch.py            # rta_fast_loop + planner
 ```
 
 ## What the node does

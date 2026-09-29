@@ -13,7 +13,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 
-#include <mocap_msgs/msg/full_state.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/rc_channels.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
@@ -63,7 +63,7 @@ struct Plan {
   int n_rows() const { return static_cast<int>(ref.size() / 5); }
   int n_ff() const { return static_cast<int>(ff.size() / 2); }
   int index_at(double t) const {  // RolloutPlan.index_at
-    const int idx = static_cast<int>((t - t_start) / dt);
+    const int idx = static_cast<int>((t - t_start) / dt + 1e-6);  // + 1e-6 row: exact row times must not truncate
     return std::clamp(idx, 0, std::max(n_ff() - 1, 0));
   }
   Eigen::Matrix<double, 5, 1> ref_row(int i) const {
@@ -94,9 +94,10 @@ class RtaFastLoop : public rclcpp::Node {
     rates_pub_ = create_publisher<VehicleRatesSetpoint>("/fmu/in/vehicle_rates_setpoint", px4_qos);
     tick_pub_ = create_publisher<ControlTick>("/rta/control_tick", rclcpp::QoS(100).reliable());
 
-    odom_sub_ = create_subscription<mocap_msgs::msg::FullState>(
-        "/merge_odom_localpos/full_state_relay", px4_qos,
-        [this](mocap_msgs::msg::FullState::ConstSharedPtr msg) { on_odometry(*msg); }, sub_opts);
+    // PX4's odometry directly (100 Hz, NED), not the mocap_px4_relays relay (25 Hz with gaps up to 150 ms)
+    odom_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
+        "/fmu/out/vehicle_odometry", px4_qos,
+        [this](px4_msgs::msg::VehicleOdometry::ConstSharedPtr msg) { on_odometry(*msg); }, sub_opts);
     status_sub_ = create_subscription<VehicleStatus>(
         "/fmu/out/vehicle_status_v1", px4_qos,
         [this](VehicleStatus::ConstSharedPtr msg) {
@@ -158,13 +159,16 @@ class RtaFastLoop : public rclcpp::Node {
                 msg->backup_grace);
   }
 
-  void on_odometry(const mocap_msgs::msg::FullState& msg) {
+  void on_odometry(const px4_msgs::msg::VehicleOdometry& msg) {
     auto s = std::make_shared<VehicleState>();
     const auto [roll, pitch, yaw_raw] = rta::euler_xyz(msg.q[0], msg.q[1], msg.q[2], msg.q[3]);
     const double yaw = unwrap_(yaw_raw);  // only this callback touches the unwrapper (subscription group)
     s->nr = {msg.position[0], msg.position[1], msg.position[2], msg.velocity[0], msg.velocity[1], msg.velocity[2],
              roll, pitch, yaw};
-    s->planar << msg.position[1], msg.position[2], msg.velocity[1], msg.velocity[2], roll;
+    // planar model state (py, pz, h, v, theta): h, v are BODY-frame velocities, [h; v] = R(theta)^T [vy; vz]
+    const double c = std::cos(roll), sn = std::sin(roll);
+    s->planar << msg.position[1], msg.position[2], c * msg.velocity[1] + sn * msg.velocity[2],
+        -sn * msg.velocity[1] + c * msg.velocity[2], roll;
     state_.store(std::const_pointer_cast<const VehicleState>(s));
   }
 
@@ -347,7 +351,7 @@ class RtaFastLoop : public rclcpp::Node {
   rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_pub_;
   rclcpp::Publisher<VehicleRatesSetpoint>::SharedPtr rates_pub_;
   rclcpp::Publisher<ControlTick>::SharedPtr tick_pub_;
-  rclcpp::Subscription<mocap_msgs::msg::FullState>::SharedPtr odom_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::RcChannels>::SharedPtr rc_sub_;
   rclcpp::Subscription<PlannerStatus>::SharedPtr planner_sub_;

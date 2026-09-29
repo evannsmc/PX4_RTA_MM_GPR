@@ -506,7 +506,7 @@ px4_rta_mm_gpr_cpp/    rta_fast_loop, control_law.hpp, control_law_check
 
 Both are `ament_cmake` packages.
 
-**Two processes.** `ros2 launch px4_rta_mm_gpr cpp_relay_rta_launch.py` starts the relay, `rta_fast_loop`
+**Two processes.** `ros2 launch px4_rta_mm_gpr cpp_rta_launch.py` starts `rta_fast_loop`
 and `px4_rta_mm_gpr --cpp-control`:
 
 | process | owns |
@@ -558,7 +558,7 @@ compute time. Rollouts, AOT compilation, the executors and every lock described 
 |-------------|------|---------|
 | `rclcpp/rclcpp.hpp` | the ROS 2 C++ client library | node, publishers, subscriptions, wall timers, callback groups, `MultiThreadedExecutor` |
 | `px4_msgs/msg/*.hpp` | PX4 message types | offboard mode, vehicle command, setpoints, vehicle status, RC |
-| `mocap_msgs/msg/full_state.hpp` | the relay's message | odometry |
+| `px4_msgs/msg/vehicle_odometry.hpp` | PX4 odometry (100 Hz) | the fast loop's state |
 | `px4_rta_mm_gpr_msgs/msg/*.hpp` | this project's messages | the four topics above |
 | `Eigen/Dense` | linear-algebra templates | fixed-size vectors and matrices in the control law |
 | `<atomic>`, `<memory>` | atomics, smart pointers | `std::atomic<std::shared_ptr<const T>>` snapshots |
