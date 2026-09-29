@@ -88,3 +88,10 @@ def test_position_uncertainty_widens_box_and_threshold(tmp_path):
         half = 0.5 * (p['reachable_tube'][0, 5:7] - p['reachable_tube'][0, 0:2])
         assert np.all(half >= 0.05 - 1e-12)                              # initial box contains the estimate error
         assert np.allclose(rta.plan_threshold(p, 0.25), 0.30)
+
+
+def test_embedding_variants_run():
+    """All three embedding systems (paper (68)-(69), (66)-(67), (64)-(65)) and the static GP certify and fly."""
+    for eps, emb in ((0.25, 'uw'), (0.0, 'uw'), (0.0, 'u'), (0.0, 'none')):
+        res = simulate(SimConfig(duration=1.0, gp_epsilon=eps, embedding=emb), winds=calm())
+        assert res.summary['completed'] and res.summary['uncertified_fraction'] == 0.0, (eps, emb)

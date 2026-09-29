@@ -59,6 +59,8 @@ class SimConfig:
     x_pert: float = 5e-4
     min_altitude: Optional[float] = 0.3    # (m) ground floor in the certificate (None: no floor)
     gp_feedforward: bool = True
+    gp_epsilon: float = 0.25               # TVGPR forgetting rate; 0 = time-invariant GP
+    embedding: str = 'uw'                  # 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
     gp_learn: bool = True
     observe_period: Optional[float] = 0.1  # (s) wind observations for the GP; None: only at replans (original studies)
     obs_noise_std: float = 0.0             # (N) noise added to each wind observation
@@ -107,7 +109,8 @@ def simulate(config: SimConfig = SimConfig(), winds: Optional[Tuple[Callable, Ca
         mass=cfg.mass, horizon=cfg.tube_horizon, timestep=cfg.dt, ulim_lower=ulim_lower, ulim_upper=ulim_upper,
         goal_state=tuple(cfg.goal), x_pert=(cfg.x_pert,) * 5, collection_threshold=cfg.collection_threshold,
         n_obs=cfg.n_obs, early_exit=cfg.early_exit, margin_steps=int(round(cfg.tube_margin / cfg.dt)),
-        min_altitude=cfg.min_altitude, gp_feedforward=cfg.gp_feedforward))
+        min_altitude=cfg.min_altitude, gp_feedforward=cfg.gp_feedforward, gp_epsilon=cfg.gp_epsilon,
+        embedding=cfg.embedding))
     f_true = jax.jit(lambda x, u, wy, wz: quad.f(0.0, x, u, wy, wz))
     step = lambda x, u, wy, wz: np.asarray(f_true(x, u, jnp.array([wy]), jnp.array([wz])))
     hover = np.array([cfg.mass * GRAVITY, 0.0])

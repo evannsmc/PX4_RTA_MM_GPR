@@ -153,8 +153,11 @@ WY_INPUT_IDX = 1
 WZ_INPUT_IDX = 0
 
 
+EMBEDDINGS = ('uw', 'u', 'none')   # paper Appendix A: (68)-(69), (66)-(67), (64)-(65)
+
+
 def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des, div=50,
-               gp_feedforward=False):
+               gp_feedforward=False, gp_epsilon=0.25, embedding='uw'):
     """Build the one-step update of the (embedding system, reference) pair.
 
     Shared by the full-horizon scan (jitted_rollout) and the early-exit loop
@@ -163,9 +166,24 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
     gp_feedforward: add the GP mean disturbance's component along the thrust axis to the reference thrust,
     u1 = M g + (wz cos(theta) - wy sin(theta)) - K (x - x_des). Without it the reference LQR (no integral action)
     settles where K_pz * e = wz, e.g. 0.98 N / 0.32 N/m = 3 m short of the goal in SITL.
+
+    gp_epsilon: TVGPR forgetting rate; 0 is the time-invariant GP (the temporal kernel (1 - eps)^(|t - t'|/2) = 1).
+
+    embedding (paper, Appendix A), all around the reference (x_r, u_r, w_r = mu(t, x_r)) with the controller
+    u = u_r + K_p (x - x_r), K_p = -K_feed (the node's LQR gain enters as u = u_r - K_feed (x - x_r)):
+      'uw'   (68)-(69): ([M_x] + [M_u] K_p + [M_w][M_x^mu]) (x - x_r) + [M_w][-s, s] + f(x_r, u_r, w_r)
+      'u'    (66)-(67): ([M_x] + [M_u] K_p) (x - x_r) + [M_w]([gamma, gamma_bar] - w_r) + f(x_r, u_r, w_r)
+      'none' (64)-(65): [M_x] (x - x_r) + [M_u]([u, u_bar] - u_r) + [M_w]([gamma, gamma_bar] - w_r) + f(x_r, u_r, w_r),
+                        [u, u_bar] = clip(u_r + K_p (x - x_r)) by interval arithmetic over the box
+    [gamma, gamma_bar]: min/max of mu -+ 3 sigma over the box (29)-(30). Each GP depends on one state (altitude or y),
+    and the disturbance enters only h and v, so evaluating gamma on the whole box equals the face-wise (64)-(67).
+    The mixed Jacobian of f is taken over w in [gamma, gamma_bar] (every disturbance the box can produce).
     """
-    GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Y
-    GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = 0.25) # define the GP model for the disturbance in Z
+    if embedding not in EMBEDDINGS:
+        raise ValueError(f"embedding must be one of {EMBEDDINGS}, got {embedding!r}")
+    K_p = -K_feed   # paper convention u = u_r + K_p (x - x_r)
+    GPY = TVGPR(obs_wy, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = gp_epsilon) # define the GP model for the disturbance in Y
+    GPZ = TVGPR(obs_wz, sigma_f = 5.0, l=2.0, sigma_n = 0.01, epsilon = gp_epsilon) # define the GP model for the disturbance in Z
 
     def mean_disturbance_wy(t, x) :
             return GPY.mean(jnp.hstack((t, x[WY_INPUT_IDX]))).reshape(-1)
@@ -238,16 +256,8 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
         sig_upper_y = jnp.sqrt(w_diff_Y.upper + sigma_lip_Y[0])
         sig_upper_z = jnp.sqrt(w_diff_Z.upper + sigma_lip_Z[0])
 
-        w_diffint_Y = irx.icentpert(0.0, sig_upper_y)
+        w_diffint_Y = irx.icentpert(0.0, sig_upper_y)   # [-s, s]
         w_diffint_Z = irx.icentpert(0.0, sig_upper_z)
-
-        wint_Y = irx.interval(GP_mean_t_Y) + w_diffint_Y # type: ignore
-        wint_Z = irx.interval(GP_mean_t_Z) + w_diffint_Z # type: ignore
-
-        # Compute the mixed Jacobian inclusion matrix for the system dynamics function and the disturbance function
-        Mt, Mx, Mu, MwY, MwZ = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint_Y, wint_Z,
-                                    centers=((jnp.array([t]), xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z),),
-                                    permutations=(perm,))[0]
 
         _, MGY = G_mjacM_Y(irx.interval(jnp.array([t])), irx.ut2i(xt_emb),
                         centers=((jnp.array([t]), xt_ref,),),
@@ -257,6 +267,24 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
                         centers=((jnp.array([t]), xt_ref,),),
                         permutations=(G_perm,))[0]
 
+        # [gamma, gamma_bar] (29)-(30): min/max over the box of mu -+ 3 sigma, from samples along the box diagonal (each
+        # GP depends on one state) + a Lipschitz buffer from the mean's Jacobian bound (as for sigma above)
+        x_samples = xint.lower + (xint.upper - xint.lower) * jnp.linspace(0., 1., div).reshape(-1, 1)
+        mu_Y = jax.vmap(lambda x: mean_disturbance_wy(t, x))(x_samples)
+        mu_Z = jax.vmap(lambda x: mean_disturbance_wz(t, x))(x_samples)
+        mu_lip_Y = jnp.maximum(jnp.abs(MGY.lower), jnp.abs(MGY.upper)) @ x_div.T
+        mu_lip_Z = jnp.maximum(jnp.abs(MGZ.lower), jnp.abs(MGZ.upper)) @ x_div.T
+        gamma_Y = irx.interval(jnp.min(mu_Y, axis=0) - mu_lip_Y - sig_upper_y, jnp.max(mu_Y, axis=0) + mu_lip_Y + sig_upper_y)
+        gamma_Z = irx.interval(jnp.min(mu_Z, axis=0) - mu_lip_Z - sig_upper_z, jnp.max(mu_Z, axis=0) + mu_lip_Z + sig_upper_z)
+        # Jacobian domain for w: every disturbance the box can produce (contains mu(x_r) +- s as well)
+        wint_Y = irx.interval(jnp.minimum(gamma_Y.lower, GP_mean_t_Y - sig_upper_y), jnp.maximum(gamma_Y.upper, GP_mean_t_Y + sig_upper_y))
+        wint_Z = irx.interval(jnp.minimum(gamma_Z.lower, GP_mean_t_Z - sig_upper_z), jnp.maximum(gamma_Z.upper, GP_mean_t_Z + sig_upper_z))
+
+        # Compute the mixed Jacobian inclusion matrix for the system dynamics function and the disturbance function
+        Mt, Mx, Mu, MwY, MwZ = sys_mjacM( irx.interval(t), irx.ut2i(xt_emb), ulim, wint_Y, wint_Z,
+                                    centers=((jnp.array([t]), xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z),),
+                                    permutations=(perm,))[0]
+
         Mt = irx.interval(Mt)
         Mx = irx.interval(Mx)
         Mu = irx.interval(Mu)
@@ -264,8 +292,17 @@ def _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, u
         MwZ = irx.interval(MwZ)
 
 
-        # Embedding system for reachable tube overapproximation due to state/input/disturbance uncertainty around the quad_sys_planar.f reference system under K_ref
-        F = lambda t, x, u, wy, wz: (Mx + Mu@K_feed + MwY@MGY + MwZ@MGZ)@(x - xt_ref) + MwY@w_diffint_Y + MwZ@w_diffint_Z + quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z) # with GP Jac
+        # Embedding system for the reachable tube around the reference (see the docstring for the three formulations)
+        f_ref = quad_sys.f(0., xt_ref, u_ref_clipped, GP_mean_t_Y, GP_mean_t_Z)
+        if embedding == 'uw':      # (68)-(69): first order in u and w
+            F = lambda t, x, u, wy, wz: (Mx + Mu@K_p + MwY@MGY + MwZ@MGZ)@(x - xt_ref) + MwY@w_diffint_Y + MwZ@w_diffint_Z + f_ref
+        elif embedding == 'u':     # (66)-(67): first order in u; disturbance bounded over the box
+            F = lambda t, x, u, wy, wz: (Mx + Mu@K_p)@(x - xt_ref) + MwY@(gamma_Y - GP_mean_t_Y) + MwZ@(gamma_Z - GP_mean_t_Z) + f_ref
+        else:                      # (64)-(65): input interval from the feedback law by interval arithmetic
+            def F(t, x, u, wy, wz):
+                u_int = irx.interval(u_ref_clipped) + irx.interval(K_p)@(x - xt_ref)
+                u_int = irx.interval(jnp.clip(u_int.lower, ulim.lower, ulim.upper), jnp.clip(u_int.upper, ulim.lower, ulim.upper))
+                return Mx@(x - xt_ref) + Mu@(u_int - u_ref_clipped) + MwY@(gamma_Y - GP_mean_t_Y) + MwZ@(gamma_Z - GP_mean_t_Z) + f_ref
         embsys = irx.ifemb(quad_sys, F)
         xt_emb_p1 = xt_emb + dt*embsys.E(irx.interval(jnp.array([t])), xt_emb, u_ref_clipped, wint_Y, wint_Z)
 
@@ -289,10 +326,12 @@ def _row_fails(xref_row, xemb_row, threshold, z_max=jnp.inf):
 
 
 ## JIT: Rollout function (full horizon)
-@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys', 'gp_feedforward'])
-def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.]), gp_feedforward=False):
+@partial(jax.jit, static_argnames=['T', 'dt', 'perm', 'sys_mjacM', 'MASS', 'ulim', 'quad_sys', 'gp_feedforward',
+                                   'gp_epsilon', 'embedding'])
+def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des=jnp.array([0., -2.4, 0., 0., 0.]), gp_feedforward=False,
+                   gp_epsilon=0.25, embedding='uw'):
     step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des,
-                      gp_feedforward=gp_feedforward)
+                      gp_feedforward=gp_feedforward, gp_epsilon=gp_epsilon, embedding=embedding)
     tt = jnp.arange(0, T, dt) + t_init # define the time horizon for the rollout
 
     final_carry, (embedding_sys_traj, reference_traj, control_traj) = jax.lax.scan(step, (irx.i2ut(ix), xc), tt)
@@ -306,7 +345,7 @@ def jitted_rollout(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, T, dt, p
 
 def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz, x_des, threshold, *, n_steps, dt,
                             perm, sys_mjacM, MASS, ulim, quad_sys, margin_steps, z_max=jnp.inf,
-                            gp_feedforward=False):
+                            gp_feedforward=False, gp_epsilon=0.25, embedding='uw'):
     """Early-exit rollout: integrate only until the tube first leaves the certification threshold, plus a margin.
 
     The scan is causal, so every computed row is IDENTICAL to the corresponding row of jitted_rollout and the
@@ -316,7 +355,7 @@ def rollout_until_violation(t_init, ix, xc, K_feed, K_reference, obs_wy, obs_wz,
     Returns: tube (n_steps+1, 10), ref (n_steps+1, 5), u (n_steps, 2), violation_idx (-1 if none), n_valid
     """
     step = _make_step(obs_wy, obs_wz, K_feed, K_reference, dt, perm, sys_mjacM, MASS, ulim, quad_sys, x_des,
-                      gp_feedforward=gp_feedforward)
+                      gp_feedforward=gp_feedforward, gp_epsilon=gp_epsilon, embedding=embedding)
     x0_emb = irx.i2ut(ix)
     tube = jnp.full((n_steps + 1, x0_emb.shape[0]), jnp.nan).at[0].set(x0_emb)
     ref = jnp.full((n_steps + 1, xc.shape[0]), jnp.nan).at[0].set(xc)

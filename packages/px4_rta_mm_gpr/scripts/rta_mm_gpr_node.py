@@ -60,6 +60,8 @@ class RuntimeOptions:
     nr_ref_from_plan: bool = True        # NR's y/z reference = the RTA plan at t + T_lookahead (no conflicting goals)
     nr_anti_windup: bool = True          # clip the NR pitch/yaw-rate channels to the CBF limits (+-0.8 rad/s)
     gp_feedforward: bool = True          # reference thrust cancels the GP mean disturbance (no altitude offset)
+    gp: str = 'tv'                       # 'tv': time-varying GP (epsilon 0.25); 'static': time-invariant GP (epsilon 0)
+    embedding: str = 'uw'                # embedding system: 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
     min_altitude: float = 0.3            # (m) certified tubes must stay this far above the ground (<= 0: no floor)
     tube_threshold: float = 0.25         # (m) certified tubes: position bounds (py, pz) within this (+ delta) of the reference
     position_uncertainty: str = 'auto'   # delta: 'auto' (sim 0, hardware 'ekf2'), 'ekf2', or a fixed value in metres
@@ -367,6 +369,7 @@ class OffboardControl(Node):
             entry_ramp=options.entry_ramp,
             thrust_limits_mass_scaled=options.thrust_limits_mass_scaled,
             gp_feedforward=options.gp_feedforward, min_altitude=options.min_altitude,
+            gp=options.gp, gp_epsilon=self.rollout_config.gp_epsilon, embedding=options.embedding,
             position_uncertainty=self.delta_mode, uncertainty_sigmas=options.uncertainty_sigmas,
             backup=options.backup, backup_grace=options.backup_grace,
             ramp_speed_y=options.ramp_speed_y, ramp_speed_z=options.ramp_speed_z))
@@ -517,7 +520,9 @@ class OffboardControl(Node):
             early_exit=self.options.tube_early_exit,
             margin_steps=int(round(self.options.tube_margin / self.tube_timestep)),
             min_altitude=self.options.min_altitude if self.options.min_altitude > 0 else None,
-            gp_feedforward=self.options.gp_feedforward)
+            gp_feedforward=self.options.gp_feedforward,
+            gp_epsilon={'tv': 0.25, 'static': 0.0}[self.options.gp],
+            embedding=self.options.embedding)
 
         # The process backend starts FIRST so the worker's rollout compilation overlaps with ours.
         rollout_backend = None

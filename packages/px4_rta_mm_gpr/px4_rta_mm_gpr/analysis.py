@@ -58,11 +58,36 @@ def summary(log: FlightLog, name: Optional[str] = None) -> pd.DataFrame:
             lowest_altitude=float(-T['z'].max()),
             lowest_certified_tube=float(-T['tube_pz_hi'].max()),
             max_attitude_deg=float(att.max()))
+        esc = tube_escapes(log)
+        e = esc['escape'].to_numpy()[esc['certified'].to_numpy()]
+        row.update(escape_pct=100 * float((e > 1e-3).mean()) if e.size else np.nan,   # > 1 mm (see tube_escapes)
+                   escape_max_m=float(e.max()) if e.size else np.nan)
     rc = rollout_times(log)
     row.update(plans=len(log.plan_seqs), rollout_ms_median=1e3 * np.median(rc) if rc.size else np.nan,
                rollout_ms_max=1e3 * rc.max() if rc.size else np.nan,
                events='; '.join(f'{r.time:.2f}s {r.kind}' for r in log.events.itertuples()) or '-')
     return pd.DataFrame([row])
+
+
+def tube_escapes(log: FlightLog) -> pd.DataFrame:
+    """Per certified control tick: how far the vehicle's position is OUTSIDE the certified box of the row in use
+    (0 = inside). In a numerical simulation this is the true state; in SITL / hardware it is the state estimate.
+    A certificate is only as good as its disturbance model: a GP that is confidently wrong about the wind shows up
+    here as escapes.
+    The box is looked up in the stored plan at row floor((t - t_start) / dt + 1e-6) (logs written before that fix
+    recorded some ticks one row early). Escapes below ~1 mm come from stepping the tube with 10 ms Euler steps."""
+    T = log.ticks
+    cert = T['plan_expired'].to_numpy() < 0.5
+    t, y, z, seqs = T['time'].to_numpy(), T['y'].to_numpy(), T['z'].to_numpy(), T['plan_seq'].to_numpy().astype(int)
+    out = np.zeros(len(T))
+    for s_ in np.unique(seqs):
+        m = seqs == s_
+        p = log.plan(int(s_))
+        tube = p['reachable_tube']
+        k = np.clip(((t[m] - p['t_start']) / p['dt'] + 1e-6).astype(int), 0, len(tube) - 1)
+        b = tube[k]
+        out[m] = np.maximum.reduce([b[:, 0] - y[m], y[m] - b[:, 5], b[:, 1] - z[m], z[m] - b[:, 6], np.zeros(m.sum())])
+    return pd.DataFrame({'time': t, 'certified': cert, 'escape': np.where(cert, out, 0.0)})
 
 
 def rollout_times(log: FlightLog) -> np.ndarray:
@@ -132,26 +157,27 @@ def plan_times(plan: dict) -> np.ndarray:
 class PlanGP:
     """The time-varying GP a rollout used (same kernel and forgetting as jax_mm_rta.TVGPR), evaluated in NumPy."""
 
-    def __init__(self, obs: np.ndarray):
+    def __init__(self, obs: np.ndarray, epsilon: float = GP_EPSILON):
         obs = np.asarray(obs, dtype=float)
+        self.epsilon = float(epsilon)
         self.ts, self.s, self.y = obs[:, 0], obs[:, 1], obs[:, 2:3]
         k = GP_SIGMA_F * np.exp(-0.5 * (self.s[:, None] - self.s[None, :]) ** 2 / GP_LENGTH ** 2)
-        d = (1 - GP_EPSILON) ** (np.abs(self.ts[:, None] - self.ts[None, :]) / 2)
+        d = (1 - self.epsilon) ** (np.abs(self.ts[:, None] - self.ts[None, :]) / 2)
         self.L = np.linalg.inv(k * d + GP_SIGMA_N ** 2 * np.eye(len(self.s)))
 
     def predict(self, t: float, s) -> tuple:
         """Mean and standard deviation at time t and positions s (array)."""
         s = np.atleast_1d(np.asarray(s, dtype=float))
         ks = GP_SIGMA_F * np.exp(-0.5 * (self.s[:, None] - s[None, :]) ** 2 / GP_LENGTH ** 2)
-        ks = ks * ((1 - GP_EPSILON) ** ((t - self.ts) / 2))[:, None]
+        ks = ks * ((1 - self.epsilon) ** ((t - self.ts) / 2))[:, None]
         mean = (ks.T @ (self.L @ self.y)).ravel()
         var = GP_SIGMA_F - np.einsum('ij,ik,kj->j', ks, self.L, ks)
         return mean, np.sqrt(np.maximum(var, 0.0))
 
 
-def plan_gp(plan: dict, which: str = 'y') -> PlanGP:
+def plan_gp(plan: dict, which: str = 'y', epsilon: float = GP_EPSILON) -> PlanGP:
     """GP of the y-wind (a function of altitude coordinate pz) or z-wind (a function of py) used by a plan."""
-    return PlanGP(plan['obs_wy' if which == 'y' else 'obs_wz'])
+    return PlanGP(plan['obs_wy' if which == 'y' else 'obs_wz'], epsilon)
 
 
 # ----------------------------------------------------------------------------------------------- plots
@@ -335,6 +361,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
     expired = T['plan_expired'].to_numpy().astype(bool)
     md = log.metadata
     thr = float(md.get('collection_threshold', 0.25))
+    gp_eps = float(md.get('gp_epsilon', GP_EPSILON))
     floor = md.get('min_altitude')
     floor = float(floor) if isinstance(floor, (int, float, np.floating)) and floor > 0 else None
     goal = md.get('goal', md.get('goal_state'))
@@ -480,7 +507,7 @@ def animate(log: FlightLog, out_path: Optional[str] = None, gif_path: Optional[s
             quiver.set_UVC(wy_f(t, q_alt), -wz_f(t, q_y))
         tube_c = p['reachable_tube'][row_now:n_cert]
         for (axis, xs, mean_l, band, true_l, pts, span, now_l), which in zip(panels, ('y', 'z')):
-            gp = plan_gp(p, which)
+            gp = plan_gp(p, which, gp_eps)
             m, sd = gp.predict(t, -xs if which == 'y' else xs)      # the y-wind GP input is pz (NED) = -altitude
             mean_l.set_data(xs, m)
             band[0].remove()

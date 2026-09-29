@@ -49,6 +49,8 @@ class RolloutConfig:
     margin_steps: int = 50        # rows kept past the violation (fallback reference if a replan is late)
     min_altitude: Optional[float] = None  # (m) the whole tube must stay this far above the ground (None: no floor)
     gp_feedforward: bool = False  # reference thrust cancels the GP mean disturbance
+    gp_epsilon: float = 0.25      # TVGPR forgetting rate; 0 = time-invariant GP
+    embedding: str = 'uw'         # embedding system (paper Appendix A): 'uw' (68)-(69), 'u' (66)-(67), 'none' (64)-(65)
 
 
 @dataclass(frozen=True)
@@ -113,7 +115,8 @@ class RolloutEngine:
         if cfg.early_exit:
             core = partial(rollout_until_violation, n_steps=self.n_steps, dt=cfg.timestep, perm=self.perm,
                            sys_mjacM=self.sys_mjacM, MASS=cfg.mass, ulim=self.ulim, quad_sys=self.quad_sys,
-                           margin_steps=cfg.margin_steps, z_max=z_max, gp_feedforward=cfg.gp_feedforward)
+                           margin_steps=cfg.margin_steps, z_max=z_max, gp_feedforward=cfg.gp_feedforward,
+                           gp_epsilon=cfg.gp_epsilon, embedding=cfg.embedding)
 
             def rollout(t0, state, x_pert, K_fb, K_ref, obs_wy, obs_wz, goal, threshold):
                 return core(t0, irx.icentpert(state, x_pert), state, K_fb, K_ref, obs_wy, obs_wz, goal, threshold)
@@ -121,7 +124,8 @@ class RolloutEngine:
             def rollout(t0, state, x_pert, K_fb, K_ref, obs_wy, obs_wz, goal, threshold):
                 tube, ref, u = jitted_rollout(t0, irx.icentpert(state, x_pert), state, K_fb, K_ref, obs_wy, obs_wz,
                                               cfg.horizon, cfg.timestep, self.perm, self.sys_mjacM, cfg.mass,
-                                              self.ulim, self.quad_sys, goal, gp_feedforward=cfg.gp_feedforward)
+                                              self.ulim, self.quad_sys, goal, gp_feedforward=cfg.gp_feedforward,
+                                              gp_epsilon=cfg.gp_epsilon, embedding=cfg.embedding)
                 return tube, ref, u, collection_id_jax(ref, tube, threshold, z_max), ref.shape[0]
 
         f64 = lambda *shape: jax.ShapeDtypeStruct(shape, jnp.float64)

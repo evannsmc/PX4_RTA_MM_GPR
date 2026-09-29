@@ -105,6 +105,11 @@ def main():
                              "--uncertainty-sigmas, per axis), or a fixed value in metres")
     parser.add_argument("--uncertainty-sigmas", type=float, default=3.0,
                         help="standard deviations of EKF2's position estimate that make up delta")
+    parser.add_argument("--gp", choices=['tv', 'static'], default='tv',
+                        help="wind model: tv = time-varying GP (forgetting 0.25), static = time-invariant GP")
+    parser.add_argument("--embedding", choices=['uw', 'u', 'none'], default='uw',
+                        help="embedding system (paper Appendix A): uw = first order in u and w (68)-(69); "
+                             "u = first order in u only (66)-(67); none = no first-order terms (64)-(65)")
     parser.add_argument("--backup", choices=['land', 'none'], default='land',
                         help="what to do when no certified plan exists: PX4 LAND, or keep flying the expired plan")
     parser.add_argument("--backup-grace", type=float, default=0.02,
@@ -151,6 +156,7 @@ def main():
                              entry_ramp=args.entry_ramp,
                              thrust_limits_mass_scaled=args.thrust_limits_mass_scaled,
                              gp_feedforward=args.gp_feedforward,
+                             gp=args.gp, embedding=args.embedding,
                              min_altitude=args.min_altitude,
                              tube_threshold=args.tube_threshold,
                              position_uncertainty=args.position_uncertainty,

@@ -42,5 +42,6 @@ class RolloutPlan:
         Independent of how often the control loop actually ran since the plan was computed,
         so control-rate jitter or rollout latency cannot desynchronise the reference.
         """
-        idx = int((t - self.t_start) / self.dt)
+        # + 1e-6 row: a tick exactly on a row time must not truncate to the previous row ((0.03 - 0) / 0.01 = 2.9999...)
+        idx = int((t - self.t_start) / self.dt + 1e-6)
         return min(max(idx, 0), self.feedfwd_input.shape[0] - 1)
